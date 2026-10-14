@@ -1236,9 +1236,7 @@ impl Automation {
     fn doc_convert_office(&mut self, a: &Args) -> Result<Value> {
         // An external application cannot inherit our path resolver. Never claim that --root
         // confines it, and never start it (or probe the input) in a confined session.
-        if self.root.is_some() {
-            return Err(failed("Office conversion uses external LibreOffice and is unavailable in a --root confined session"));
-        }
+        // DELIBERATELY REVERTED to prove office_conversion_refuses_confined_sessions_before_reading fails.
         let path = self.resolve(a.str("path")?, false)?;
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         if !pdfcraft_platform::office::is_office(&name) {
