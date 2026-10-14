@@ -31,7 +31,8 @@ LibreOffice: the external application cannot inherit PdfCraft's path resolver.
 It is not an OS sandbox. The browser version cannot run this local converter.
 
 Each conversion gets a temporary directory and a fresh LibreOffice profile with
-macro execution disabled and Writer/Calc automatic link updates disabled. Original
+macro execution and active content disabled, untrusted document links blocked, and
+Writer/Calc automatic link updates disabled. These preferences are not an OS sandbox. Original
 filenames are not used as command-line switches. The input is copied under a fixed
 name and the temporary files are removed on return. Limits are 128 MiB input,
 120 seconds and 256 MiB output. Missing LibreOffice, failed conversions, empty
