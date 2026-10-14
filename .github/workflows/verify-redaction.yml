@@ -1,0 +1,49 @@
+name: Verify redaction candidate
+on:
+  push:
+    branches: [codex/verify-redaction]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_DEV_DEBUG: 0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      - name: Format candidate and preserve exact formatting patch
+        run: |
+          cargo fmt --all
+          git diff > formatting.patch
+      - name: Redaction crate tests
+        run: cargo test -p pdfcraft-redact -j 2
+      - name: Prove JPEG regression fails without fix
+        run: |
+          cp crates/redact/src/image.rs /tmp/image-fixed.rs
+          git show c1a41cc5c7c2460fb60af880af69ee28a0c71bd5:crates/redact/src/image.rs > crates/redact/src/image.rs
+          if cargo test -p pdfcraft-redact -j 2 jpeg_redaction_preserves_uncovered_samples_and_retires_original_after_save > /tmp/regression.log 2>&1; then
+            echo "Regression unexpectedly passes without fix"; exit 1
+          fi
+          cat /tmp/regression.log
+          grep -q "jpeg_redaction_preserves_uncovered_samples_and_retires_original_after_save ... FAILED" /tmp/regression.log
+          cp /tmp/image-fixed.rs crates/redact/src/image.rs
+      - name: Clippy
+        run: cargo clippy -p pdfcraft-redact -j 2 --all-targets -- -D warnings
+      - name: Layer and asset checks
+        run: |
+          cargo xtask layers
+          cargo xtask assets
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: formatting
+          path: formatting.patch
