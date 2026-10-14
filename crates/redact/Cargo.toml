@@ -17,5 +17,6 @@ pdfcraft-forms = { workspace = true }
 pdfcraft-edit = { workspace = true }
 pdfcraft-annot = { workspace = true }
 thiserror = { workspace = true }
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 
 [dev-dependencies]

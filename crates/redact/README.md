@@ -19,7 +19,10 @@ clear_marks(&mut doc, None)?;                        // remove marks without app
   inside;
 - **images**: fully covered → removed; partly covered → a copy with the covered pixels cleared
   (8/16-bit and 1/2/4-bit images, image masks; Flate/LZW/RL/A85/AHx). Codecs PdfCraft can't
-  re-encode (DCT, JPX, JBIG2, CCITT) are removed whole (fail-closed); inline images under an
+  re-encode (JPX, JBIG2, CCITT) are removed whole (fail-closed). Plain 8-bit DeviceGray/DeviceRGB
+  JPEGs are decoded, cleared and written as Flate: uncovered decoded samples stay exact and
+  JPEG application segments are discarded. CMYK, complex color spaces, explicit DCT decode
+  parameters and inconsistent dimensions are still removed whole; inline images under an
   area are removed;
 - **vectors**: covered paths are removed; partly covered paths and shadings are clipped so
   nothing paints inside the areas;
@@ -62,4 +65,4 @@ Security numbers and dates for Search & Redact.
 Custom code sets aren't supported yet.
 
 Not yet: pattern locales, struct-tree/alt-text cleanup, metadata and hidden-information
-sanitising (M8.4), re-encoding of DCT images (they are removed instead).
+sanitising (M8.4), partial clearing of CMYK/complex DCT, JPX, JBIG2 and CCITT images.

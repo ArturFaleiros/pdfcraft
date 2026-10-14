@@ -5537,7 +5537,7 @@ status = "shipped"
 commands = ["redact.mark"]
 tools = ["redact_mark"]
 evidence = ["crates/ui-egui/tests/ui_group/redact.rs::marking_applying_and_clearing", "crates/redact/src/tests.rs::images_are_removed_or_have_their_pixels_cleared"]
-notes = "drag a box anywhere else"
+notes = "drag a box anywhere else; plain 8-bit gray/RGB JPEGs are cleared and stored losslessly as Flate; CMYK, explicit DCT parameters and unsupported codecs are still removed whole"
 
 [[feature]]
 id = "protect.redact-pages"
