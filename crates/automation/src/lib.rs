@@ -1250,7 +1250,9 @@ impl Automation {
             let mut bytes = Vec::new();
             file.take(pdfcraft_platform::office::MAX_INPUT_BYTES + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
             pdfcraft_platform::office::convert_to_pdf(&name, &bytes)
-        }).map_err(failed)?.map_err(failed)?;
+        })
+        .map_err(failed)?
+        .map_err(failed)?;
         let stem = name.rsplit_once('.').map_or(name.as_str(), |(stem, _)| stem);
         let id = self.session.open_new(format!("{stem}.pdf"), Arc::new(converted)).map_err(failed)?;
         Ok(summary(self.session.get(id).ok_or_else(|| failed("the document vanished"))?))

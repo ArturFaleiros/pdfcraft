@@ -86,7 +86,11 @@ mod native {
                 #[cfg(unix)]
                 {
                     // Each conversion owns a separate process group, including launcher children.
-                    let _ = Command::new("/bin/kill").args(["-KILL", "--", &format!("-{}", self.0.id())]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+                    let _ = Command::new("/bin/kill")
+                        .args(["-KILL", "--", &format!("-{}", self.0.id())])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status();
                 }
                 #[cfg(windows)]
                 {
@@ -95,7 +99,9 @@ mod native {
                         let _ = Command::new(PathBuf::from(dir).join("System32/taskkill.exe"))
                             .args(["/PID", &self.0.id().to_string(), "/T", "/F"])
                             .creation_flags(0x08000000)
-                            .stdout(Stdio::null()).stderr(Stdio::null()).status();
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
+                            .status();
                     }
                 }
                 let _ = self.0.kill();
@@ -120,11 +126,18 @@ mod native {
         std::fs::write(&input, bytes).map_err(|e| e.to_string())?;
         let profile = url::Url::from_directory_path(directory.join("profile")).map_err(|_| "invalid temporary profile path")?;
         let mut command = Command::new(executable);
-        command.arg(format!("-env:UserInstallation={profile}"))
+        command
+            .arg(format!("-env:UserInstallation={profile}"))
             .args(["--headless", "--nologo", "--nodefault", "--norestore", "--convert-to", "pdf", "--outdir"])
-            .arg(&directory).arg(&input).current_dir(&directory)
-            .env("TMPDIR", &directory).env("TMP", &directory).env("TEMP", &directory)
-            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+            .arg(&directory)
+            .arg(&input)
+            .current_dir(&directory)
+            .env("TMPDIR", &directory)
+            .env("TMP", &directory)
+            .env("TEMP", &directory)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -150,7 +163,8 @@ mod native {
             std::thread::sleep(Duration::from_millis(50));
         }
         let path = directory.join("input.pdf");
-        let file = std::fs::File::open(&path).map_err(|_| "LibreOffice produced no PDF. Check that the document is valid and not password protected.")?;
+        let file =
+            std::fs::File::open(&path).map_err(|_| "LibreOffice produced no PDF. Check that the document is valid and not password protected.")?;
         if file.metadata().map_err(|e| e.to_string())?.len() > MAX_OUTPUT_BYTES {
             return Err("the converted PDF exceeds the 256 MiB limit".into());
         }

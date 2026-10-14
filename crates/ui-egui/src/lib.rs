@@ -1762,11 +1762,7 @@ impl PdfCraftApp {
     pub fn open_dialog(&mut self) {
         self.startup_superseded = true;
         #[cfg(not(target_arch = "wasm32"))]
-        self.pick(
-            pickers::PickFor::Open,
-            Self::open_picker(),
-            true,
-        );
+        self.pick(pickers::PickFor::Open, Self::open_picker(), true);
         // Browsers pick files asynchronously; the bytes arrive through `inbox`.
         #[cfg(target_arch = "wasm32")]
         {

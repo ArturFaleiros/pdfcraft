@@ -2989,13 +2989,15 @@ fn redacting_through_tools() {
 #[test]
 fn office_conversion_refuses_confined_sessions_before_reading() {
     let dir = workdir("office-confinement");
+    let before: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).collect();
     let mut a = auto(&dir);
     for path in ["inside.docx", "../outside.docx", "missing.pptx"] {
         let error = a.call("doc_convert_office", &json!({"path": path})).unwrap_err();
         assert!(error.to_string().contains("--root confined"));
     }
     assert!(a.session().docs().is_empty());
-    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+    let after: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).collect();
+    assert_eq!(before, after, "refusing conversion must not create files");
 }
 
 #[test]

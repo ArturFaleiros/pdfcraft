@@ -8,8 +8,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  CARGO_BUILD_JOBS: 2
-  PDFCRAFT_SYSTEM_FONTS: 0
+  CARGO_BUILD_JOBS: 4
+
 
 concurrency:
   group: validate-${{ github.ref }}
@@ -76,35 +76,14 @@ jobs:
         shell: pwsh
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-on-failure: true
 
       - name: Format
         if: runner.os == 'Linux'
         run: |
           cargo fmt --all
           git diff > formatting.patch
-
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Test
-        if: runner.os != 'Linux'
-        run: cargo test --workspace
-
-      - name: Test (with craft-fonts)
-        if: runner.os == 'Linux'
-        run: cargo test --workspace
-
-      - name: Layering
-        if: runner.os == 'Linux'
-        run: cargo xtask layers
-
-      - name: Assets (licences and attribution)
-        if: runner.os == 'Linux'
-        run: cargo xtask assets
-
-      - name: CLI without the MCP server still builds
-        if: runner.os == 'Linux'
-        run: cargo check -p pdfcraft-cli --no-default-features
 
       - name: Compile CLI for end-to-end checks
         run: cargo build -p pdfcraft-cli
@@ -123,6 +102,7 @@ jobs:
         shell: bash
         env:
           XDG_RUNTIME_DIR: /tmp
+          PDFCRAFT_SYSTEM_FONTS: 0
         run: |
           export PDFCRAFT_OFFICE_TEST_INPUT="$GITHUB_WORKSPACE/validation-output/office.docx"
           export PDFCRAFT_OFFICE_TEST_SHOT="$GITHUB_WORKSPACE/validation-output/app-office.png"
@@ -131,10 +111,34 @@ jobs:
         if: runner.os == 'Linux'
         env:
           XDG_RUNTIME_DIR: /tmp
+          PDFCRAFT_SYSTEM_FONTS: 0
         run: cargo run -p pdfcraft-ui-egui --example shot -- validation-output/app-redacted.png validation-output/jpg-after.pdf --scale 1 --language en
       - name: Render PDF independently with Poppler
         if: runner.os == 'Linux'
         run: pdftoppm -r 72 -png -singlefile validation-output/jpg-after.pdf validation-output/poppler-redacted
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        if: runner.os != 'Linux'
+        run: cargo test --workspace --no-fail-fast
+
+      - name: Test (with craft-fonts)
+        if: runner.os == 'Linux'
+        run: cargo test --workspace --no-fail-fast
+
+      - name: Layering
+        if: runner.os == 'Linux'
+        run: cargo xtask layers
+
+      - name: Assets (licences and attribution)
+        if: runner.os == 'Linux'
+        run: cargo xtask assets
+
+      - name: CLI without the MCP server still builds
+        if: runner.os == 'Linux'
+        run: cargo check -p pdfcraft-cli --no-default-features
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
