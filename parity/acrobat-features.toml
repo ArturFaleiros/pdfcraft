@@ -6877,11 +6877,11 @@ title = "Create PDF from Office documents (LibreOffice sidecar)"
 area = "J"
 tier = "P2"
 milestone = "M10"
-status = "planned"
-commands = []
-tools = []
-evidence = []
-notes = ""
+status = "partial"
+commands = ["create.file"]
+tools = ["doc_convert_office"]
+evidence = ["crates/automation/tests/automation.rs::office_conversion_opens_a_new_unsaved_pdf", "crates/ui-egui/src/open_worker_tests.rs::office_open_converts_in_background_without_replacing_the_source"]
+notes = "Optional LibreOffice sidecar: DOCX/DOC/PPTX/PPT/XLSX/XLS/ODT/ODP/ODS/RTF open as a new unsaved PDF (desktop File > Open, doc_convert_office). The evidence tests are #[ignore] because they need LibreOffice and a generated input; they were run on Windows and Linux CI. Still missing: layout fidelity beyond what LibreOffice and the installed fonts give, password-protected and macro-enabled files, the web build, an OS sandbox for the converter (it is refused in --root sessions), and a way to pick the converter in Preferences."
 
 [[feature]]
 id = "create.create-multiple"

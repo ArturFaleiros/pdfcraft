@@ -31,6 +31,30 @@ fn fixture(pages: usize) -> Vec<u8> {
     bytes
 }
 
+#[test]
+#[ignore = "requires LibreOffice and PDFCRAFT_OFFICE_TEST_INPUT pointing to a synthetic Office document"]
+fn office_open_converts_in_background_without_replacing_the_source() {
+    let path = std::env::var("PDFCRAFT_OFFICE_TEST_INPUT").unwrap();
+    let original = std::fs::read(&path).unwrap();
+    let (mut h, client) = harness();
+    let result = request(&mut h, &client, "ui.open", json!({"path": path}));
+    assert_eq!(result["pending"], true);
+    let start = std::time::Instant::now();
+    while h.state().views.len() == 1 && start.elapsed() < Duration::from_secs(130) {
+        h.run_steps(2);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(h.state().views.len(), 2, "conversion must open a new tab");
+    let doc = h.state().session.get(h.state().views[1].id).unwrap();
+    assert!(doc.name.ends_with(".pdf") && doc.path.is_none() && doc.dirty);
+    assert!(!doc.info.pages.is_empty());
+    assert_eq!(std::fs::read(path).unwrap(), original);
+    if let Ok(path) = std::env::var("PDFCRAFT_OFFICE_TEST_SHOT") {
+        h.run_steps(4);
+        h.render().unwrap().save(path).unwrap();
+    }
+}
+
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 fn harness() -> (Harness<'static, PdfCraftApp>, ControlClient) {
     let slot: Arc<Mutex<Option<ControlClient>>> = Arc::default();

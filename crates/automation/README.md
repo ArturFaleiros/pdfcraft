@@ -184,3 +184,7 @@ unapplied with a warning.
 `doc_batch` runs conversion, OCR and compression over files and optionally recursive
 folders. The CLI also exposes it as `pdfcraft-cli batch`. See the
 [batch guide](../../docs/cli-batch.md) for examples, output protection, errors and limits.
+
+## Office conversion
+
+The doc_convert_office tool opens an Office document as a new unsaved PDF using a separately installed LibreOffice. It refuses --root confined sessions because an external program cannot inherit the path resolver. See [Office to PDF](../../docs/office-conversion.md) for formats, limits, setup and end-to-end tests.
