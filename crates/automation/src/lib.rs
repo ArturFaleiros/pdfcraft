@@ -353,6 +353,7 @@ impl Automation {
             }
             "page_set_box" => self.page_set_box(&a)?,
             "doc_create" => self.doc_create(&a)?,
+            "doc_convert_office" => self.doc_convert_office(&a)?,
             "doc_flatten" => {
                 let (comments, fields) = (a.opt_bool("comments")?.unwrap_or(true), a.opt_bool("fields")?.unwrap_or(true));
                 if !comments && !fields {
@@ -1230,6 +1231,29 @@ impl Automation {
         } else {
             Ok(json!({ "count": files.len(), "files": files, "lower_dpi": lowered }))
         }
+    }
+
+    fn doc_convert_office(&mut self, a: &Args) -> Result<Value> {
+        // An external application cannot inherit our path resolver. Never claim that --root
+        // confines it, and never start it (or probe the input) in a confined session.
+        if self.root.is_some() {
+            return Err(failed("Office conversion uses external LibreOffice and is unavailable in a --root confined session"));
+        }
+        let path = self.resolve(a.str("path")?, false)?;
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if !pdfcraft_platform::office::is_office(&name) {
+            return Err(ToolError::InvalidArgs("choose a Word, PowerPoint, Excel, OpenDocument or RTF file".into()));
+        }
+        let converted = pdfcraft_engine::guard(|| {
+            use std::io::Read;
+            let file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
+            let mut bytes = Vec::new();
+            file.take(pdfcraft_platform::office::MAX_INPUT_BYTES + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+            pdfcraft_platform::office::convert_to_pdf(&name, &bytes)
+        }).map_err(failed)?.map_err(failed)?;
+        let stem = name.rsplit_once('.').map_or(name.as_str(), |(stem, _)| stem);
+        let id = self.session.open_new(format!("{stem}.pdf"), Arc::new(converted)).map_err(failed)?;
+        Ok(summary(self.session.get(id).ok_or_else(|| failed("the document vanished"))?))
     }
 
     fn doc_create(&mut self, a: &Args) -> Result<Value> {

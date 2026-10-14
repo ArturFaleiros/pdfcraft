@@ -6878,10 +6878,10 @@ area = "J"
 tier = "P2"
 milestone = "M10"
 status = "planned"
-commands = []
-tools = []
-evidence = []
-notes = ""
+commands = ["create.file"]
+tools = ["doc_convert_office"]
+evidence = ["crates/automation/tests/automation.rs::office_conversion_opens_a_new_unsaved_pdf", "crates/ui-egui/src/open_worker_tests.rs::office_open_converts_in_background_without_replacing_the_source"]
+notes = "Native optional LibreOffice converter candidate: DOCX/DOC/PPTX/PPT/XLSX/XLS/ODT/ODP/ODS/RTF. Opens a new unsaved PDF. Requires separately installed LibreOffice; refused in --root sessions, unavailable on web. Layout depends on installed fonts/import filters. External converter is not sandboxed. Dedicated real-converter tests require LibreOffice and a generated input. Not yet validated."
 
 [[feature]]
 id = "create.create-multiple"

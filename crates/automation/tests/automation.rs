@@ -2987,6 +2987,33 @@ fn redacting_through_tools() {
 }
 
 #[test]
+fn office_conversion_refuses_confined_sessions_before_reading() {
+    let dir = workdir("office-confinement");
+    let mut a = auto(&dir);
+    for path in ["inside.docx", "../outside.docx", "missing.pptx"] {
+        let error = a.call("doc_convert_office", &json!({"path": path})).unwrap_err();
+        assert!(error.to_string().contains("--root confined"));
+    }
+    assert!(a.session().docs().is_empty());
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+}
+
+#[test]
+#[ignore = "requires LibreOffice and PDFCRAFT_OFFICE_TEST_INPUT pointing to a synthetic Office document"]
+fn office_conversion_opens_a_new_unsaved_pdf() {
+    let path = std::env::var("PDFCRAFT_OFFICE_TEST_INPUT").unwrap();
+    let original = std::fs::read(&path).unwrap();
+    let mut a = Automation::new();
+    let result = ok(&mut a, "doc_convert_office", json!({"path": path}));
+    let id = result["doc"].as_u64().unwrap();
+    assert!(result["dirty"].as_bool().unwrap());
+    assert!(!a.session().docs()[0].info.pages.is_empty());
+    assert!(a.session().docs()[0].path.is_none());
+    assert!(page_text(&mut a, id).join(" ").contains("PUBLICO"));
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+}
+
+#[test]
 fn redacting_with_codes_through_tools() {
     let dir = workdir("redact-codes");
     std::fs::write(dir.join("memo.txt"), "Informant Jane Roe met the agent\nPublic line").unwrap();

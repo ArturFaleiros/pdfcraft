@@ -20,6 +20,7 @@ pub(crate) enum Input {
 
 pub(crate) enum ResultKind {
     Conversion(Arc<Vec<u8>>),
+    OfficePdf(Arc<Vec<u8>>),
     Prepared { bytes: Arc<Vec<u8>>, result: Box<Result<PreparedDocument, OpenError>> },
     ReadFailed(String),
     RemoteFailed(String),
@@ -161,6 +162,19 @@ fn run(queue: Arc<(Mutex<Queue>, Condvar)>) {
 
 fn prepare(job: Job) -> ResultKind {
     let bytes = match &job.input {
+        Input::Path(path) if pdfcraft_platform::office::is_office(&job.name) => {
+            use std::io::Read;
+            let read = (|| -> std::io::Result<Vec<u8>> {
+                let file = std::fs::File::open(path)?;
+                let mut bytes = Vec::new();
+                file.take(pdfcraft_platform::office::MAX_INPUT_BYTES + 1).read_to_end(&mut bytes)?;
+                Ok(bytes)
+            })();
+            match read {
+                Ok(bytes) => Arc::new(bytes),
+                Err(error) => return ResultKind::ReadFailed(error.to_string()),
+            }
+        }
         Input::Path(path) => match std::fs::read(path) {
             Ok(bytes) => Arc::new(bytes),
             Err(error) => return ResultKind::ReadFailed(error.to_string()),
@@ -175,6 +189,13 @@ fn prepare(job: Job) -> ResultKind {
         },
         Input::Bytes(bytes) => bytes.clone(),
     };
+    // Only a direct user open may invoke an external converter, never a PDF's remote link.
+    if matches!(&job.input, Input::Path(_) | Input::Bytes(_)) && pdfcraft_platform::office::is_office(&job.name) {
+        return match pdfcraft_platform::office::convert_to_pdf(&job.name, &bytes) {
+            Ok(pdf) => ResultKind::OfficePdf(Arc::new(pdf)),
+            Err(error) => ResultKind::Failed(error),
+        };
+    }
     if matches!(pdfcraft_engine::source_kind(&job.name, &bytes), Some(SourceKind::Image | SourceKind::Text)) {
         return ResultKind::Conversion(bytes);
     }

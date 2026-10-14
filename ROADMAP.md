@@ -1,5 +1,7 @@
 # PdfCraft roadmap
 
+- 2026-10-14: M10 candidate — optional local LibreOffice conversion opens Office files as unsaved PDFs in the desktop app and via doc_convert_office; real-converter validation pending. See docs/office-conversion.md.
+
 **Stage: alpha** · next: beta, ~26% (ready for real work 49% → 75%) and ~400–700 h away
 
 > **Last reviewed:** 2026-10-13 · **Last updated:** 2026-10-13 · **Change:** minor (M3 candidate: native opens retain chosen tools through password retries and defer startup intake while preparation is pending; estimates unchanged) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
