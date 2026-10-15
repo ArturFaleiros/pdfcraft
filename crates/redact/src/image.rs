@@ -1,9 +1,11 @@
 //! Clearing the pixels of an image under redaction regions. The image is decoded, every pixel
 //! whose centre maps into a region is set to zero (no ink for image masks), and the result is
 //! written as a new Flate image; the original object is untouched (other pages may use it).
-//! Images whose codec PdfCraft can't decode (DCT, JPX, JBIG2, CCITT) return `None`, and the
+//! Gray/RGB JPEGs are decoded to samples and saved losslessly, without JPEG application data.
+//! Images whose codec PdfCraft can't decode (JPX, JBIG2, CCITT) return `None`, and the
 //! caller removes the whole image instead; that is fail-closed.
 
+use ::image::ImageDecoder;
 use pdfcraft_content::{Matrix, overlaps};
 use pdfcraft_cos::{Document, Object, Stream};
 
@@ -45,6 +47,11 @@ fn decode_and_clear(doc: &Document, s: &Stream, ctm: &Matrix, rects: &[[f64; 4]]
     if s.dict.contains(b"SMask") || s.dict.contains(b"Mask") {
         return None;
     }
+    let jpeg = match s.dict.get(b"Filter") {
+        Some(Object::Name(n)) => n == b"DCTDecode" || n == b"DCT",
+        Some(Object::Array(a)) if a.len() == 1 => matches!(a.first()?.as_name(), Some(b"DCTDecode" | b"DCT")),
+        _ => false,
+    };
     let supported = |n: &[u8]| {
         matches!(
             n,
@@ -57,11 +64,11 @@ fn decode_and_clear(doc: &Document, s: &Stream, ctm: &Matrix, rects: &[[f64; 4]]
         Some(Object::Array(a)) => a.iter().all(|f| f.as_name().is_some_and(supported)),
         _ => false,
     };
-    if !ok {
+    if !ok && !jpeg {
         return None;
     }
     let (w, h) = (s.dict.int(b"Width")?, s.dict.int(b"Height")?);
-    if w <= 0 || h <= 0 || (w as u64) * (h as u64) > MAX_PIXELS {
+    if w <= 0 || h <= 0 || (w as u64).checked_mul(h as u64)? > MAX_PIXELS {
         return None;
     }
     let (w, h) = (w as usize, h as usize);
@@ -77,7 +84,10 @@ fn decode_and_clear(doc: &Document, s: &Stream, ctm: &Matrix, rects: &[[f64; 4]]
     let bytes = row.checked_mul(h)?;
     let row_bits = row.checked_mul(8)?;
     bytes.checked_mul(8)?;
-    let mut data = s.decoded().ok()?;
+    if bytes > (MAX_PIXELS as usize).checked_mul(8)? {
+        return None;
+    }
+    let mut data = if jpeg { jpeg_samples(doc, s, w, h, ncomp, bpc)? } else { s.decoded_within(bytes).ok()? };
     if data.len() < bytes {
         return None;
     }
@@ -127,4 +137,82 @@ fn decode_and_clear(doc: &Document, s: &Stream, ctm: &Matrix, rects: &[[f64; 4]]
     dict.remove(b"DecodeParms");
     dict.remove(b"Alternates");
     Some(Some(Stream::flate(dict, &data)))
+}
+
+/// Restrict the JPEG path to color spaces whose decoded samples retain the PDF semantics.
+/// Explicit DCT ColorTransform and complex color spaces stay fail-closed until supported.
+fn jpeg_samples(doc: &Document, s: &Stream, w: usize, h: usize, channels: usize, bpc: usize) -> Option<Vec<u8>> {
+    let cs = doc.resolve(s.dict.get(b"ColorSpace")?);
+    let expected = match cs.as_name()? {
+        b"DeviceGray" | b"G" => ::image::ColorType::L8,
+        b"DeviceRGB" | b"RGB" => ::image::ColorType::Rgb8,
+        _ => return None,
+    };
+    if bpc != 8
+        || s.dict.contains(b"DecodeParms")
+        || s.dict.contains(b"ImageMask")
+        || s.raw.len() > (MAX_PIXELS as usize) * 4
+        || jpeg_components(&s.raw)? != channels
+    {
+        return None;
+    }
+    let size = w.checked_mul(h)?.checked_mul(channels)?;
+    let mut reader = ::image::ImageReader::with_format(std::io::Cursor::new(s.raw.as_ref()), ::image::ImageFormat::Jpeg);
+    let mut limits = ::image::Limits::default();
+    limits.max_image_width = Some(u32::try_from(w).ok()?);
+    limits.max_image_height = Some(u32::try_from(h).ok()?);
+    limits.max_alloc = Some(MAX_PIXELS * 4);
+    reader.limits(limits);
+    let decoder = reader.into_decoder().ok()?;
+    if decoder.dimensions() != (u32::try_from(w).ok()?, u32::try_from(h).ok()?)
+        || decoder.color_type() != expected
+        || decoder.original_color_type() != expected.into()
+        || decoder.total_bytes() != size as u64
+    {
+        return None;
+    }
+    let mut pixels = Vec::new();
+    pixels.try_reserve_exact(size).ok()?;
+    pixels.resize(size, 0);
+    decoder.read_image(&mut pixels).ok()?;
+    Some(pixels)
+}
+
+/// `image` converts CMYK JPEGs to RGB. Check the encoded component count first, so that
+/// even a PDF incorrectly declaring DeviceRGB cannot silently reinterpret those samples.
+fn jpeg_components(bytes: &[u8]) -> Option<usize> {
+    if !bytes.starts_with(&[0xff, 0xd8]) {
+        return None;
+    }
+    let mut pos = 2usize;
+    while pos < bytes.len() {
+        if *bytes.get(pos)? != 0xff {
+            return None;
+        }
+        while bytes.get(pos) == Some(&0xff) {
+            pos = pos.checked_add(1)?;
+        }
+        let marker = *bytes.get(pos)?;
+        pos = pos.checked_add(1)?;
+        if matches!(marker, 0xd9 | 0xda) {
+            return None;
+        }
+        if marker == 0x01 || (0xd0..=0xd7).contains(&marker) {
+            continue;
+        }
+        let length = u16::from_be_bytes([*bytes.get(pos)?, *bytes.get(pos.checked_add(1)?)?]) as usize;
+        if length < 2 {
+            return None;
+        }
+        let end = pos.checked_add(length)?;
+        let segment = bytes.get(pos.checked_add(2)?..end)?;
+        if matches!(marker, 0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf) {
+            if segment.first() != Some(&8) {
+                return None;
+            }
+            return Some(usize::from(*segment.get(5)?));
+        }
+        pos = end;
+    }
+    None
 }
