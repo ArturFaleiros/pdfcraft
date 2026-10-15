@@ -1110,11 +1110,11 @@ pub fn tools() -> Vec<ToolDef> {
         t(
             "doc_create",
             "Create a PDF",
-            "Create a new, unsaved document and return it like doc_open: `blank` (pages, width, height in points; default 1 US Letter page), `images` (paths of PNG, JPEG, TIFF (every page), GIF or BMP files, one page each at the image's resolution) or `text` (a .txt path, or `text` directly; Western European (WinAnsi) characters only, others are refused). Save it with doc_save and a path.",
+            "Create a new, unsaved document and return it like doc_open: `blank` (pages, width, height in points; default 1 US Letter page), `images` (paths of PNG, JPEG, TIFF (every page), GIF or BMP files, one page each at the image's resolution) `text` (a .txt path, or `text` directly; Western European (WinAnsi) characters only, others are refused) or `office` (`path` of a Word .docx, PowerPoint .pptx or Excel .xlsx file, converted natively: Word flows onto its section's pages with styles, lists, tables, images, headers and footers; PowerPoint gives one page per visible slide; Excel prints each visible sheet's used range. Text uses the standard PDF fonts, so characters outside Western European are written as [U+XXXX]; charts, SmartArt and vector images become outlined boxes. The result's `office` says what was approximated). Save it with doc_save and a path.",
         )
         .with(schema(
             json!({
-                "from": { "type": "string", "enum": ["blank", "images", "text"] },
+                "from": { "type": "string", "enum": ["blank", "images", "text", "office"] },
                 "paths": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
                 "dpi": { "type": "number", "minimum": 1, "maximum": 1200, "description": "For images: override the embedded resolution without resampling. 72 gives one point per pixel; omit to use each image's resolution (72 when absent)." },
                 "text": { "type": "string" },

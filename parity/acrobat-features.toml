@@ -6873,15 +6873,15 @@ notes = ""
 
 [[feature]]
 id = "create.from-office"
-title = "Create PDF from Office documents (LibreOffice sidecar)"
+title = "Create PDF from Office documents"
 area = "J"
 tier = "P2"
 milestone = "M10"
-status = "planned"
-commands = []
-tools = []
-evidence = []
-notes = ""
+status = "partial"
+commands = ["create.file", "file.open"]
+tools = ["doc_create"]
+evidence = ["crates/create/src/office/tests.rs::word_paragraphs_styles_lists_tables_images_and_page_numbers", "crates/create/src/office/tests.rs::powerpoint_slides_with_inherited_placeholders_bullets_shapes_and_pictures", "crates/create/src/office/tests.rs::excel_sheets_with_formats_fills_borders_and_merges", "crates/automation/tests/automation.rs::creating_pdfs_from_word_and_powerpoint_natively"]
+notes = "Native Office Open XML import (docx/pptx/xlsx and their macro/template variants), no sidecar: Word styles, lists, tables, images, sections, headers/footers with page fields, footnotes; PowerPoint slides with master/layout inheritance, theme colours, shapes, pictures, groups, tables; Excel sheets with number formats, fills, borders, merges. Missing: embedded fonts (text uses the standard-14 faces, so non-Western characters become [U+XXXX] and line breaks can differ), charts and SmartArt (outlined boxes), EMF/WMF/SVG images, multi-column sections, Excel print areas and sheet pictures, legacy .doc/.ppt/.xls, OpenDocument, password-protected files."
 
 [[feature]]
 id = "create.create-multiple"

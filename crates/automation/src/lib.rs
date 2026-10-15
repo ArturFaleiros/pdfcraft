@@ -1233,6 +1233,8 @@ impl Automation {
     }
 
     fn doc_create(&mut self, a: &Args) -> Result<Value> {
+        // What an Office conversion approximated, returned with the new document.
+        let mut office = None;
         let (name, bytes) = match a.str("from")? {
             "blank" => {
                 let n = a.opt_int("pages")?.unwrap_or(1).clamp(1, 10_000) as usize;
@@ -1272,11 +1274,30 @@ impl Automation {
                 })?;
                 (format!("{title}.pdf"), bytes)
             }
+            "office" => {
+                let path = self.resolve(a.str("path")?, false)?;
+                let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                if !file.rsplit_once('.').is_some_and(|(_, ext)| pdfcraft_engine::OFFICE_EXTENSIONS.iter().any(|e| e.eq_ignore_ascii_case(ext))) {
+                    return Err(ToolError::InvalidArgs(format!(
+                        "{file}: office needs a Word, PowerPoint or Excel file ({})",
+                        pdfcraft_engine::OFFICE_EXTENSIONS.join(", ")
+                    )));
+                }
+                let data = std::fs::read(&path).map_err(|e| failed(format!("{}: {e}", path.display())))?;
+                let (bytes, report) = self.session.create_from_office(&file, &data).map_err(failed)?;
+                let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                office = Some(json!({ "kind": report.kind.label(), "pages": report.pages, "escaped": report.escaped, "notes": report.notes }));
+                (format!("{stem}.pdf"), bytes)
+            }
             other => return Err(ToolError::InvalidArgs(format!("unknown source {other:?}"))),
         };
         let name = a.opt_str("name")?.map(str::to_owned).unwrap_or(name);
         let id = self.session.open_new(name, bytes).map_err(failed)?;
-        Ok(summary(self.session.get(id).ok_or_else(|| failed("the document vanished"))?))
+        let mut out = summary(self.session.get(id).ok_or_else(|| failed("the document vanished"))?);
+        if let (Some(report), Some(map)) = (office, out.as_object_mut()) {
+            map.insert("office".into(), report);
+        }
+        Ok(out)
     }
 
     fn page_set_box(&mut self, a: &Args) -> Result<Value> {

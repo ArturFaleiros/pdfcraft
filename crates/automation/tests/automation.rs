@@ -2740,7 +2740,7 @@ fn creating_from_multiple_files_through_tools() {
     }
     std::fs::write(dir.join("scan.png"), png).unwrap();
     std::fs::write(dir.join("notes.txt"), "hello").unwrap();
-    std::fs::write(dir.join("report.docx"), b"PK\x03\x04").unwrap();
+    std::fs::write(dir.join("report.odt"), b"PK\x03\x04").unwrap();
     let mut a = auto(&dir);
 
     // Combine: every file converted, in the order given, with a bookmark per file.
@@ -2760,8 +2760,8 @@ fn creating_from_multiple_files_through_tools() {
     assert_eq!(titles, ["notes", "a", "scan"]);
     assert!(dir.join("all.pdf").is_file());
     // A file that can't be converted fails the whole combine, naming it.
-    let err = a.call("doc_create_multiple", &json!({ "paths": ["a.pdf", "report.docx"] })).unwrap_err();
-    assert!(matches!(&err, ToolError::Failed(m) if m.contains("report.docx") && m.contains("can't be converted")), "{err}");
+    let err = a.call("doc_create_multiple", &json!({ "paths": ["a.pdf", "report.odt"] })).unwrap_err();
+    assert!(matches!(&err, ToolError::Failed(m) if m.contains("report.odt") && m.contains("can't be converted")), "{err}");
     assert!(matches!(a.call("doc_create_multiple", &json!({ "paths": [] })), Err(ToolError::InvalidArgs(_))));
     assert!(matches!(a.call("doc_create_multiple", &json!({ "paths": ["a.pdf"], "mode": "zip" })), Err(ToolError::InvalidArgs(_))));
     assert!(matches!(a.call("doc_create_multiple", &json!({ "paths": ["a.pdf"], "mode": "separate" })), Err(ToolError::InvalidArgs(_))));
@@ -2770,7 +2770,7 @@ fn creating_from_multiple_files_through_tools() {
     // existing file is never overwritten.
     std::fs::create_dir_all(dir.join("out")).unwrap();
     std::fs::write(dir.join("out/notes.pdf"), b"mine").unwrap();
-    let args = json!({ "paths": ["notes.txt", "report.docx", "a.pdf", "scan.png", "missing.txt"], "mode": "separate", "out_dir": "out" });
+    let args = json!({ "paths": ["notes.txt", "report.odt", "a.pdf", "scan.png", "missing.txt"], "mode": "separate", "out_dir": "out" });
     let made = ok(&mut a, "doc_create_multiple", args);
     let files = made["files"].as_array().unwrap();
     assert!(files[0]["output"].as_str().unwrap().ends_with("notes (2).pdf"), "{files:?}");
@@ -4451,6 +4451,42 @@ fn exporting_to_word_html_and_rtf() {
     assert!(std::fs::read(dir.join("a.pptx")).unwrap().starts_with(b"PK"));
     assert!(std::fs::read_to_string(dir.join("a.rtf")).unwrap().contains("Page 2"));
     assert!(a.call("doc_export_office", &json!({ "doc": doc, "path": "a.xyz" })).is_err());
+}
+
+#[test]
+fn creating_pdfs_from_word_and_powerpoint_natively() {
+    let dir = workdir("office-import");
+    let mut a = auto(&dir);
+    let text =
+        ok(&mut a, "doc_create", json!({ "from": "text", "text": "Relatório de vendas\nSegunda linha com acentuação" }))["doc"].as_u64().unwrap();
+    ok(&mut a, "doc_export_office", json!({ "doc": text, "path": "report.docx" }));
+    ok(&mut a, "doc_export_office", json!({ "doc": text, "path": "report.pptx" }));
+    let before = std::fs::read(dir.join("report.docx")).unwrap();
+    for (file, kind) in [("report.docx", "Word"), ("report.pptx", "PowerPoint")] {
+        let r = ok(&mut a, "doc_create", json!({ "from": "office", "path": file }));
+        assert_eq!(r["office"]["kind"], kind, "{r}");
+        assert!(r["dirty"].as_bool().unwrap(), "a new, unsaved document");
+        let id = r["doc"].as_u64().unwrap();
+        let pages = page_text(&mut a, id);
+        assert_eq!(pages.len(), 1, "{file}: {pages:?}");
+        let joined = pages.join(" ");
+        assert!(joined.contains("Relatório de vendas") && joined.contains("acentuação"), "{file}: {joined}");
+        assert_eq!(r["name"], file.replace(".docx", ".pdf").replace(".pptx", ".pdf"));
+    }
+    assert_eq!(std::fs::read(dir.join("report.docx")).unwrap(), before, "the source is only read");
+    // Saved and reopened, the conversion is an ordinary PDF.
+    let made = ok(&mut a, "doc_create", json!({ "from": "office", "path": "report.docx" }))["doc"].as_u64().unwrap();
+    ok(&mut a, "doc_save", json!({ "doc": made, "path": "report.pdf" }));
+    let reopened = ok(&mut a, "doc_open", json!({ "path": "report.pdf" }))["doc"].as_u64().unwrap();
+    assert!(page_text(&mut a, reopened).join(" ").contains("Segunda linha"));
+    // Wrong kinds and paths are refused with a reason; --root still confines the path.
+    std::fs::write(dir.join("notes.txt"), "x").unwrap();
+    assert!(matches!(a.call("doc_create", &json!({ "from": "office", "path": "notes.txt" })), Err(ToolError::InvalidArgs(_))));
+    std::fs::write(dir.join("fake.docx"), "not a package").unwrap();
+    let err = a.call("doc_create", &json!({ "from": "office", "path": "fake.docx" })).unwrap_err().to_string();
+    assert!(err.contains("not an Office Open XML package"), "{err}");
+    assert!(a.call("doc_create", &json!({ "from": "office", "path": "../outside.docx" })).is_err());
+    assert!(a.call("doc_create", &json!({ "from": "office" })).is_err());
 }
 
 /// #773: a diagonal watermark must not enter the body flow or move invoice fields.
