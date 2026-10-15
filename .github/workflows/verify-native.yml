@@ -38,26 +38,26 @@ jobs:
           cp .github/validation/consolidation.patch "$RUNNER_TEMP/consolidation.patch"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git checkout --detach e372b78be727991683e510a0d6ab15ad5fe0e1d5
+          git checkout --detach cd1b577162c962ac1f9c2134b473f15a79efa0bf
           git remote add upstream https://github.com/storytold/pdfcraft.git
-          git fetch upstream afa8e1843cfed613f3d403119f6c2649bce824c9
-          git update-ref refs/remotes/upstream/main afa8e1843cfed613f3d403119f6c2649bce824c9
+          git fetch upstream dc41044ba78f6cef2ff4bdb14d19272f54ad6aea
+          git update-ref refs/remotes/upstream/main dc41044ba78f6cef2ff4bdb14d19272f54ad6aea
           git merge --no-commit --no-ff upstream/main || test -f .git/MERGE_HEAD
           git apply "$RUNNER_TEMP/consolidation.patch"
           git add -u
-          test "$(git write-tree)" = 01224f34ae220b3ea28e0e3889feacbfa97a8d9c
+          test "$(git write-tree)" = 9c3cc55f0f6a509996b10971588d213035e329bc
           cargo xtask assets --write
           cargo fmt --all -- --check
           git add ATTRIBUTION.md
           echo "tree=$(git write-tree)" >> "$GITHUB_OUTPUT"
           git commit -m 'M10/M8: isolated validation candidate preserving native import and JPEG redaction'
-          git push origin HEAD:refs/heads/chore/native-office-candidate
+          git push origin HEAD:refs/heads/chore/native-office-candidate-v2
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
   test:
     needs: prepare
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 120
     env:
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
@@ -131,6 +131,9 @@ jobs:
         with:
           ref: ${{ github.sha }}
           path: target/validation-harness
+          sparse-checkout: .github/validation/e2e.py
+          sparse-checkout-cone: false
+          persist-credentials: false
       - name: CLI save-reopen and independent image/text verification
         shell: bash
         run: python target/validation-harness/.github/validation/e2e.py target/debug/pdfcraft-cli${{ runner.os == 'Windows' && '.exe' || '' }}

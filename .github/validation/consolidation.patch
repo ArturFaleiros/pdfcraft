@@ -1,666 +1,134 @@
+diff --git a/ATTRIBUTION.md b/ATTRIBUTION.md
+index 139f10a..903d132 100644
+--- a/ATTRIBUTION.md
++++ b/ATTRIBUTION.md
+@@ -27,13 +27,8 @@ Every asset PdfCraft includes, bundles or uses to build its published material,
+ | `crates/ui-egui/src/i18n/uk.tsv` | Ukrainian interface translation catalog | PdfCraft contributors | MIT OR Apache-2.0 | Contributor-original: clean-room translations of PdfCraft's English UI labels, no proprietary localisation resources | Ukrainian UI strings, compiled in by crates/ui-egui/src/i18n/mod.rs |
+ | `crates/ui-egui/src/i18n/ar.tsv` | Arabic interface translation catalog | PdfCraft contributors | MIT OR Apache-2.0 | Contributor-original: clean-room translations of PdfCraft's English UI labels, no proprietary localisation resources | Arabic UI strings, compiled in by crates/ui-egui/src/i18n/mod.rs |
+ | `crates/ui-egui/src/i18n/tr.tsv` | Turkish interface translation catalog | PdfCraft contributors | MIT OR Apache-2.0 | Contributor-original: clean-room translations of PdfCraft's English UI labels, no proprietary localisation resources | Turkish UI strings, compiled in by crates/ui-egui/src/i18n/mod.rs |
+-<<<<<<< HEAD
+-| `crates/ui-egui/src/i18n/lt.tsv` | Lithuanian interface translation catalog | PdfCraft contributors | MIT OR Apache-2.0 | Contributor-original: clean-room translations of PdfCraft's English UI labels and user-facing messages; reviewed by a native Lithuanian-speaking contributor | Lithuanian UI strings, compiled in by crates/ui-egui/src/i18n/mod.rs |
+-| `crates/ui-egui/src/i18n/vi.tsv` | Vietnamese interface translation catalog | PdfCraft contributors | MIT OR Apache-2.0 | Contributor-original: clean-room translations of PdfCraft's English UI labels; PhotoCraft and VectorCraft Vietnamese catalogs used only as translation memory when English source and semantic context matched; base catalog reviewed by a native Vietnamese-speaking contributor; the three Office-import messages are contributor-original AI-assisted translations, native review welcome | Vietnamese UI strings, compiled in by crates/ui-egui/src/i18n/mod.rs |
+-=======
+ | `crates/ui-egui/src/i18n/lt.tsv` | Lithuanian interface translation catalog | PdfCraft contributors | MIT OR Apache-2.0 | Contributor-original: clean-room translations of PdfCraft's English UI labels and user-facing messages; original catalog reviewed by a native Lithuanian-speaking contributor; 2026-10-15 coverage additions are AI-assisted and not separately native-reviewed | Lithuanian UI strings, compiled in by crates/ui-egui/src/i18n/mod.rs |
+ | `crates/ui-egui/src/i18n/vi.tsv` | Vietnamese interface translation catalog | PdfCraft contributors | MIT OR Apache-2.0 | Contributor-original: clean-room translations of PdfCraft's English UI labels; PhotoCraft and VectorCraft Vietnamese catalogs used only as translation memory when English source and semantic context matched; original catalog reviewed by a native Vietnamese-speaking contributor; 2026-10-15 coverage additions are AI-assisted and not separately native-reviewed | Vietnamese UI strings, compiled in by crates/ui-egui/src/i18n/mod.rs |
+->>>>>>> upstream/main
+ | `assets/icons/accessibility.svg` | Lucide icon "accessibility" | Lucide Contributors (portions Cole Bemis, Feather) | ISC | https://github.com/lucide-icons/lucide (npm lucide-static 1.49.0, icons/accessibility.svg) | UI icon, embedded via crates/ui-egui/src/icon_data.rs |
+ | `assets/icons/align-left.svg` | Lucide icon "align-left" | Lucide Contributors (portions Cole Bemis, Feather) | ISC | https://github.com/lucide-icons/lucide (npm lucide-static 1.49.0, icons/align-left.svg) | UI icon, embedded via crates/ui-egui/src/icon_data.rs |
+ | `assets/icons/align-center.svg` | Lucide icon "align-center" | Lucide Contributors (portions Cole Bemis, Feather) | ISC | https://github.com/lucide-icons/lucide (npm lucide-static 1.49.0, icons/align-center.svg) | UI icon, embedded via crates/ui-egui/src/icon_data.rs |
 diff --git a/ATTRIBUTION.toml b/ATTRIBUTION.toml
-index d22dad5..98544c4 100644
+index 6e23e5d..d2a2f3a 100644
 --- a/ATTRIBUTION.toml
 +++ b/ATTRIBUTION.toml
-@@ -7,11 +7,7 @@ licence = "MIT OR Apache-2.0"
- licence_file = "LICENSE-MIT"
- kind = "translation"
- usage = "Greek UI strings, compiled in by crates/ui-egui/src/i18n/mod.rs"
--<<<<<<< HEAD
--sha256 = "f7fe878af28a1b51fa76d89a10b149567fe24294f73ade5273222a63cd85dda3"
--=======
--sha256 = "cefa955aa92790d6773cb1d1e15e19019b3165a00528d57d6617362e1d1988ab"
-->>>>>>> upstream/main
-+sha256 = "95205b4121c040797ff61c292b5237df910a4886bac73a7bcda73dcb6279f605"
- 
- # ATTRIBUTION.toml: one entry per asset (AGENTS.md §1). The source of truth for provenance and licences.
- # ATTRIBUTION.md is generated from this file: `cargo xtask assets --write`. Checked by `cargo xtask assets` (part of `xtask ci`).
-@@ -34,11 +30,7 @@ licence = "MIT OR Apache-2.0"
- licence_file = "LICENSE-MIT"
- kind = "translation"
- usage = "Simplified Chinese UI strings, compiled in by crates/ui-egui/src/i18n/mod.rs"
--<<<<<<< HEAD
--sha256 = "6c45b3302f8e17f7f1bffd3e6686a9fc35d4da482dafadd6e55fc3104c139486"
--=======
--sha256 = "1de29a6cc089be31cb6206bf41e0715f8ddcf74ef887b45ccee235d743bed223"
-->>>>>>> upstream/main
-+sha256 = "2c86dcbc532c0196ac9c7672424a02989bea78d6ce3c2ae9405b45af28a77716"
- 
- [[asset]]
- path = "crates/ui-egui/src/i18n/zh-hant.tsv"
-@@ -49,11 +41,7 @@ licence = "MIT OR Apache-2.0"
+@@ -41,11 +41,7 @@ licence = "MIT OR Apache-2.0"
  licence_file = "LICENSE-MIT"
  kind = "translation"
  usage = "Traditional Chinese UI strings, compiled in by crates/ui-egui/src/i18n/mod.rs"
 -<<<<<<< HEAD
--sha256 = "4f6b80913b36fe47e6bc805ea33b8acc7538d528c8dd17494741bce1791f1fd9"
+-sha256 = "03b80636639dedb393c424577e62469864500cd0c32e104e439934380faedc4b"
 -=======
--sha256 = "8c6d5b1505d76bc7ba606c98660afa60b1152c5b4c2e7d345104a6ef3d280ed2"
+-sha256 = "0b0dafa3806a6b3508684f64e1f07b435113f8efd0e59201d12250c63c1d9547"
 ->>>>>>> upstream/main
-+sha256 = "03b80636639dedb393c424577e62469864500cd0c32e104e439934380faedc4b"
++sha256 = "4b80b74faf80d1fd49068af1fec591b843b509e1e823be4efb61d33ed816e7cd"
  
  [[asset]]
  path = "crates/ui-egui/src/i18n/cs.tsv"
-@@ -64,11 +52,7 @@ licence = "MIT OR Apache-2.0"
- licence_file = "LICENSE-MIT"
- kind = "translation"
- usage = "Czech UI strings, compiled in by crates/ui-egui/src/i18n/mod.rs"
--<<<<<<< HEAD
--sha256 = "eee7c0d6f99fdc2f8e840f936c2a0ede3a02f0da2e095004dbb5ca569854c14f"
--=======
--sha256 = "8a8aed18bd8fceabd1389580361ba75b0dccf141d845650a353d8dfe19c95536"
-->>>>>>> upstream/main
-+sha256 = "dfb459afda1b4477ced98ca8fa3a74c23c1a76bf98501fe41996220f615c23a9"
- 
- [[asset]]
- path = "crates/ui-egui/src/i18n/pt-br.tsv"
-@@ -79,11 +63,7 @@ licence = "MIT OR Apache-2.0"
- licence_file = "LICENSE-MIT"
- kind = "translation"
- usage = "Brazilian Portuguese UI strings, compiled in by crates/ui-egui/src/i18n/mod.rs"
--<<<<<<< HEAD
--sha256 = "362148b1b3ce5efaeaed6f5254a400f2f310ceda94e0eb69b05c83020aaea8ca"
--=======
--sha256 = "1c197ac045810950aceb733152a296f2224f38857b1169032fdc7092ab4aa3f7"
-->>>>>>> upstream/main
-+sha256 = "6968e7cd1f040d5aa5eca9c2823917d445cfaadf026ad13805d328b9dfeef1f7"
- 
- [[asset]]
- path = "crates/ui-egui/src/i18n/es.tsv"
-@@ -94,11 +74,7 @@ licence = "MIT OR Apache-2.0"
- licence_file = "LICENSE-MIT"
- kind = "translation"
- usage = "Spanish UI strings, compiled in by crates/ui-egui/src/i18n/mod.rs"
--<<<<<<< HEAD
--sha256 = "284f680fc049546d7911a6a50887cec90bb229d88b4b19d525de3b6fb23a50a3"
--=======
--sha256 = "a9cf0e062b006b40f549ce2316b88d4b0196d70bd9cecd66c12d980d699bf679"
-->>>>>>> upstream/main
-+sha256 = "77f3c2aca947e6fc3205aed85f6ae39d39e5d46a790efdbf3195f3f9d4e9d7eb"
- 
- [[asset]]
- path = "crates/ui-egui/src/i18n/fr.tsv"
-@@ -109,11 +85,7 @@ licence = "MIT OR Apache-2.0"
- licence_file = "LICENSE-MIT"
- kind = "translation"
- usage = "French UI strings, compiled in by crates/ui-egui/src/i18n/mod.rs"
--<<<<<<< HEAD
--sha256 = "de0dd6328f09ba2ce819402f41eb14291ab9f200c0814f8e33b73f1827f02145"
--=======
--sha256 = "ef5c84bd13ef8318f7deab7f42136cfe3c14cbef6fd5231014b94167baaecd2a"
-->>>>>>> upstream/main
-+sha256 = "d9f6828fdb19117e0f0f898a4d41c0cf7d268ffa5f183c7a6595637281a7dabd"
- 
- [[asset]]
- path = "crates/ui-egui/src/i18n/de.tsv"
-@@ -124,11 +96,7 @@ licence = "MIT OR Apache-2.0"
- licence_file = "LICENSE-MIT"
- kind = "translation"
- usage = "German UI strings, compiled in by crates/ui-egui/src/i18n/mod.rs"
--<<<<<<< HEAD
--sha256 = "add0c03a55a8f4f6fae40d0fb6bdc8ff10664667794536e712196767482a14ab"
--=======
--sha256 = "be689af8bb22537879269ad9ab9bdcc4b730665cf0b27c6bf4bad560cacf3b69"
-->>>>>>> upstream/main
-+sha256 = "6a39d1330f2e8e4966b65e326657a6b755ee31d488c40e146dd54b15c9988971"
- 
- [[asset]]
- path = "crates/ui-egui/src/i18n/te.tsv"
-@@ -139,11 +107,7 @@ licence = "MIT OR Apache-2.0"
- licence_file = "LICENSE-MIT"
- kind = "translation"
- usage = "Telugu UI strings, compiled in by crates/ui-egui/src/i18n/mod.rs"
--<<<<<<< HEAD
--sha256 = "f9483ba06660dd6ad57c5b56fedd9c32d7836a0605da5bf0ce7f4b1f7997bfaa"
--=======
--sha256 = "989d2e5f57cf22c21a85951835ca9fbd05e314da67eb4c17332df1f03679fa00"
-->>>>>>> upstream/main
-+sha256 = "e81ebe138a710f3e54d37b62683694f71c341df3d9953e9245ca4114b33590ac"
- 
- [[asset]]
- path = "crates/ui-egui/src/i18n/it.tsv"
-@@ -154,11 +118,7 @@ licence = "MIT OR Apache-2.0"
- licence_file = "LICENSE-MIT"
- kind = "translation"
- usage = "Italian UI strings, compiled in by crates/ui-egui/src/i18n/mod.rs"
--<<<<<<< HEAD
--sha256 = "113241c7814f16bea8399d54ed6bf0a10543b44dc528d7742e64ac7338e28d39"
--=======
--sha256 = "425c42acb8d98ac31b216b13c05a285e0676318dd379dcfb9d57cc7329e9d7a5"
-->>>>>>> upstream/main
-+sha256 = "4be575b8c6dcfb162eb31976ce0118ff09a71f07a59c9208ffb03ac50576a5f9"
- 
- [[asset]]
- path = "crates/ui-egui/src/i18n/pl.tsv"
-@@ -169,11 +129,7 @@ licence = "MIT OR Apache-2.0"
- licence_file = "LICENSE-MIT"
- kind = "translation"
- usage = "Polish UI strings, compiled in by crates/ui-egui/src/i18n/mod.rs"
--<<<<<<< HEAD
--sha256 = "c1a17790009fdbc2ed9b598ec4a557585f4ebc01fd82a8bfa0b6b147a9becae1"
--=======
--sha256 = "988bcf2e0322a46c0464ff7b91ab5d90193b0ea7f454812d12595eb843de6fc7"
-->>>>>>> upstream/main
-+sha256 = "ae0ba2d0bd6d40a4f7c51a6aaee0f75aa3bbb33b88323763d3a56a2b394e21b9"
- 
- [[asset]]
- path = "crates/ui-egui/src/i18n/ru.tsv"
-@@ -184,11 +140,7 @@ licence = "MIT OR Apache-2.0"
- licence_file = "LICENSE-MIT"
- kind = "translation"
- usage = "Russian UI strings, compiled in by crates/ui-egui/src/i18n/mod.rs"
--<<<<<<< HEAD
--sha256 = "1cdc039b53abe6a17d1575720cb7a2fd88263ea8f972c3c75d8ae52f716908c5"
--=======
--sha256 = "ebe7aa9152baff38ae7e36aeb4f6a7ed2198166ab93425a612a66d53e43cb363"
-->>>>>>> upstream/main
-+sha256 = "f7b4b64b12a1816939efdba8a7655197ba32a3ebe50eef90edeec468cb736325"
- 
- [[asset]]
- path = "crates/ui-egui/src/i18n/hu.tsv"
-@@ -199,11 +151,7 @@ licence = "MIT OR Apache-2.0"
- licence_file = "LICENSE-MIT"
- kind = "translation"
- usage = "Hungarian UI strings, compiled in by crates/ui-egui/src/i18n/mod.rs"
--<<<<<<< HEAD
--sha256 = "6b6ae5a2e7da0dd4652d9416338174056eb0aaadf9d53940bc00d472871472f0"
--=======
--sha256 = "69d2da21949f02c3c40f71159e377eef2fdd1a87f749d6c504e1d151ef33f643"
-->>>>>>> upstream/main
-+sha256 = "8fed10fb4b0d9add42c437c158fc8788c1d47acb122cf73c1926ed062d2ebf13"
- 
- [[asset]]
- path = "crates/ui-egui/src/i18n/bg.tsv"
-@@ -214,11 +162,7 @@ licence = "MIT OR Apache-2.0"
- licence_file = "LICENSE-MIT"
- kind = "translation"
- usage = "Bulgarian UI strings, compiled in by crates/ui-egui/src/i18n/mod.rs"
--<<<<<<< HEAD
--sha256 = "f3271e697dbc16bab1b56a8ee64e37a337d27aaed06901aac6b5e3801cfa6fa0"
--=======
--sha256 = "98359685aa555f391846f2259ac302ce1234c7a180fb4abe07c36e0c1c62211e"
-->>>>>>> upstream/main
-+sha256 = "3fe6a69d82bff7ad3b2d900cb1240b1d016764d47c43bba6763cf11f4de8535c"
- 
- [[asset]]
- path = "crates/ui-egui/src/i18n/kk.tsv"
-@@ -229,11 +173,7 @@ licence = "MIT OR Apache-2.0"
- licence_file = "LICENSE-MIT"
- kind = "translation"
- usage = "Kazakh UI strings, compiled in by crates/ui-egui/src/i18n/mod.rs"
--<<<<<<< HEAD
--sha256 = "d39b596ede90ea00b1c5bbffe33a07767d7fc8cdf2bbf6ad58cb8081ba7050ec"
--=======
--sha256 = "9f6296d9c79c848167fc80bb4cfaacc9e60f72edb70cc1d70f7b6088ada83578"
-->>>>>>> upstream/main
-+sha256 = "5c0ab77bfefade6c6dc49c482ce1f6ca049ae77a18861aa993f83e57d2e023f7"
- 
- [[asset]]
- path = "crates/ui-egui/src/i18n/ja.tsv"
-@@ -244,11 +184,7 @@ licence = "MIT OR Apache-2.0"
- licence_file = "LICENSE-MIT"
- kind = "translation"
- usage = "Japanese UI strings, compiled in by crates/ui-egui/src/i18n/mod.rs"
--<<<<<<< HEAD
--sha256 = "5ea091bd7cd0e0a265b5767d4b1d907842ba3b6cf570345c6fed886cd80f7fee"
--=======
--sha256 = "3528e85afd4117de2c22b9f37d32a380a073a49834fa5a3063d21b803606ffbf"
-->>>>>>> upstream/main
-+sha256 = "026f56c556a2c10d583c51132fa7d84dba030e19f5e6ffa0535002dd22740a11"
- 
- [[asset]]
- path = "crates/ui-egui/src/i18n/uk.tsv"
-@@ -259,11 +195,7 @@ licence = "MIT OR Apache-2.0"
- licence_file = "LICENSE-MIT"
- kind = "translation"
- usage = "Ukrainian UI strings, compiled in by crates/ui-egui/src/i18n/mod.rs"
--<<<<<<< HEAD
--sha256 = "9bd43d6bba9faa3ae41d8d1a73bbfac308cc94117923bc06ca137ceec868f362"
--=======
--sha256 = "4db7e23074d44305f4584e2cd8b9a0fc35b433cb187dad493c8f7d78a8cd4ad2"
-->>>>>>> upstream/main
-+sha256 = "e042c838d12f30dab10de2257f07012272c8cbab597ef5362e123cc82929ed55"
- 
- [[asset]]
- path = "crates/ui-egui/src/i18n/ar.tsv"
-@@ -274,11 +206,7 @@ licence = "MIT OR Apache-2.0"
- licence_file = "LICENSE-MIT"
- kind = "translation"
- usage = "Arabic UI strings, compiled in by crates/ui-egui/src/i18n/mod.rs"
--<<<<<<< HEAD
--sha256 = "f895e226eff2483c7acf6671883aa6c4db3dc0f506c5d2f3b46ca5015d565cf7"
--=======
--sha256 = "2af01de9509db4b4ae61193f41ff0f7f3b70ca5f91cd2afda667e90d34980b25"
-->>>>>>> upstream/main
-+sha256 = "f137b18c06794f7f2e021b5c76631c7912dd3524a8e2a74522a895a50a4b2bf4"
- 
- [[asset]]
- path = "crates/ui-egui/src/i18n/tr.tsv"
-@@ -289,11 +217,7 @@ licence = "MIT OR Apache-2.0"
- licence_file = "LICENSE-MIT"
- kind = "translation"
- usage = "Turkish UI strings, compiled in by crates/ui-egui/src/i18n/mod.rs"
--<<<<<<< HEAD
--sha256 = "b3f1bedbbde0fd9d1d181d1fbcf57c3ab24c0fc3001a89c55524be14067ee21d"
--=======
--sha256 = "de988b6959572931c4878a0588109c236bf8c5d46ef57c7a406b6ab42de51339"
-->>>>>>> upstream/main
-+sha256 = "eb31e80cf6ccd18a7d7bd8c5860f9d95516eafcc3e98c9bfab974ddcb8582e24"
- 
- [[asset]]
+@@ -227,36 +223,24 @@ sha256 = "eb31e80cf6ccd18a7d7bd8c5860f9d95516eafcc3e98c9bfab974ddcb8582e24"
  path = "crates/ui-egui/src/i18n/lt.tsv"
-@@ -304,23 +228,19 @@ licence = "MIT OR Apache-2.0"
+ title = "Lithuanian interface translation catalog"
+ author = "PdfCraft contributors"
+-source = "Contributor-original: clean-room translations of PdfCraft's English UI labels and user-facing messages; original catalog reviewed by a native Lithuanian-speaking contributor; 2026-10-15 coverage additions are AI-assisted and not separately native-reviewed"
++source = "Contributor-original: clean-room translations of PdfCraft's English UI labels and user-facing messages; original catalog reviewed by a native Lithuanian-speaking contributor; 2026-10-15 coverage additions and the three Office-import messages are AI-assisted and not separately native-reviewed"
+ licence = "MIT OR Apache-2.0"
  licence_file = "LICENSE-MIT"
  kind = "translation"
  usage = "Lithuanian UI strings, compiled in by crates/ui-egui/src/i18n/mod.rs"
 -<<<<<<< HEAD
--sha256 = "3b04d57189b7385b894730b4379c22185a879dbae66e58d3d4ec8d8924a574eb"
+-sha256 = "25ed750183e04e9ff9f5d70271d1fedea322bddc12552aa19711562a809c1426"
 -=======
--sha256 = "63955758227bd57329b22dc7c16ed9cee8b0a15df9453477755849c886424dd5"
-+sha256 = "25ed750183e04e9ff9f5d70271d1fedea322bddc12552aa19711562a809c1426"
+-sha256 = "62151d79be5089d964876b6569d490ee3fdacef4388684b574be9627b1354e92"
+->>>>>>> upstream/main
++sha256 = "891c4532556fce6775a504a42d0d03a0406f5de2b587c0ae6fe3a5ae0b4df10f"
  
  
  [[asset]]
  path = "crates/ui-egui/src/i18n/vi.tsv"
  title = "Vietnamese interface translation catalog"
  author = "PdfCraft contributors"
--source = "Contributor-original: clean-room translations of PdfCraft's English UI labels; PhotoCraft and VectorCraft Vietnamese catalogs used only as translation memory when English source and semantic context matched; reviewed by a native Vietnamese-speaking contributor"
-+source = "Contributor-original: clean-room translations of PdfCraft's English UI labels; PhotoCraft and VectorCraft Vietnamese catalogs used only as translation memory when English source and semantic context matched; base catalog reviewed by a native Vietnamese-speaking contributor; the three Office-import messages are contributor-original AI-assisted translations, native review welcome"
+-<<<<<<< HEAD
+-source = "Contributor-original: clean-room translations of PdfCraft's English UI labels; PhotoCraft and VectorCraft Vietnamese catalogs used only as translation memory when English source and semantic context matched; base catalog reviewed by a native Vietnamese-speaking contributor; the three Office-import messages are contributor-original AI-assisted translations, native review welcome"
+-=======
+-source = "Contributor-original: clean-room translations of PdfCraft's English UI labels; PhotoCraft and VectorCraft Vietnamese catalogs used only as translation memory when English source and semantic context matched; original catalog reviewed by a native Vietnamese-speaking contributor; 2026-10-15 coverage additions are AI-assisted and not separately native-reviewed"
+->>>>>>> upstream/main
++source = "Contributor-original: clean-room translations of PdfCraft's English UI labels; PhotoCraft and VectorCraft Vietnamese catalogs used only as translation memory when English source and semantic context matched; original catalog reviewed by a native Vietnamese-speaking contributor; 2026-10-15 coverage additions and the three Office-import messages are AI-assisted and not separately native-reviewed"
  licence = "MIT OR Apache-2.0"
  licence_file = "LICENSE-MIT"
  kind = "translation"
  usage = "Vietnamese UI strings, compiled in by crates/ui-egui/src/i18n/mod.rs"
--sha256 = "b54adaa6515dbfb0de3859b30989054e5fcc4f56e66e9cc713c7bf509bdbbac3"
+-<<<<<<< HEAD
+-sha256 = "92c98948842f329dd3d44f2a3fed60136241d8a92317a867705d261afecb3ac5"
+-=======
+-sha256 = "f9002d56e44e49429e0cdeabb10525f79f32831b94233f3c0a8a0ecb202850d5"
 ->>>>>>> upstream/main
-+sha256 = "92c98948842f329dd3d44f2a3fed60136241d8a92317a867705d261afecb3ac5"
++sha256 = "ddb1d009c996d90ddefe3f650eec95b02dffb92a4e3e66e8731f0c23a8d68148"
  
  [[asset]]
  path = "assets/icons/accessibility.svg"
-@@ -3443,10 +3363,7 @@ licence = "MIT OR Apache-2.0"
- licence_file = "LICENSE-MIT"
- kind = "translation"
- usage = "Slovene UI strings, compiled in by crates/ui-egui/src/i18n/mod.rs"
--<<<<<<< HEAD
--sha256 = "c599d2368cad869c1872e55569d9c6a123b8ba8834c9d231e5f13f5f27bd52d4"
--=======
--sha256 = "5881cc7fbfe9da5f5f611309dacf267f95db3a143b916a113b649839019b292c"
-+sha256 = "f57538722941b661495696706c9bb8d1b3e8ee81db570973bc4c2f7ef50ba61c"
- 
- [[asset]]
- path = "vendor/vello_common/assets/probe.png"
-@@ -3458,4 +3375,3 @@ licence_file = "vendor/vello_common/LICENSE-MIT"
- kind = "image"
- usage = "Reference picture of the vendored vello_common probe module, for people only; the build reads probe.rgba, not this file"
- sha256 = "78c59a0cfd2c829909d77006f94e34dac1ae5d1f90e7f10f72e84de541fef697"
-->>>>>>> upstream/main
-diff --git a/Cargo.lock b/Cargo.lock
-index 8f077f7..0dcdf54 100644
---- a/Cargo.lock
-+++ b/Cargo.lock
-@@ -4277,6 +4277,7 @@ dependencies = [
- name = "pdfcraft-redact"
- version = "0.8.0"
- dependencies = [
-+ "image",
-  "pdfcraft-annot",
-  "pdfcraft-content",
-  "pdfcraft-cos",
-diff --git a/ROADMAP.md b/ROADMAP.md
-index 879c551..00ee355 100644
---- a/ROADMAP.md
-+++ b/ROADMAP.md
-@@ -1,5 +1,7 @@
- # PdfCraft roadmap
- 
-+- 2026-10-15: M8 — partial gray/RGB JPEG redaction preserves uncovered decoded samples and drops JPEG application data, using lossless Flate output; includes save/reopen regression coverage.
-+
- **Stage: alpha** · next: beta, ~25% (ready for real work 50% → 75%) and ~400–700 h away
- 
- > **Last reviewed:** 2026-10-13 · **Last updated:** 2026-10-14 · **Change:** minor (M14: the Italian catalog has every entry the other catalogs had and the code looks up; estimates unchanged) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
-@@ -165,9 +167,8 @@ Ranked; detail and the full milestone table in [docs/roadmap.md](docs/roadmap.md
- - **2026-10-15 (M14, gap 24):** `misc.localization` and `misc.installers` move from planned to partial. Localization: 22 catalogs ship, but Chinese shows tofu in releases, Telugu has no release font and Arabic is not mirrored. Installers: macOS and Windows releases are signed, Linux packages are not. The Acrobat menu diff itself remains open. Estimates unchanged.
- - **2026-10-13 (G14, Vietnamese localization):** Added Vietnamese (`vi`, Tiếng Việt) as an interface and date language with a 2,591-entry catalog (`plural_none`) covering 100% of the current localizable key union (plus `theme`/`Appearance`). Locale tags `vi` / `vi-VN` / `vi_VN.UTF-8` resolve; calendar months use numeric `Tháng 1`…`12` / `tháng 1`…`12`. Native-speaker community review recorded. The twelve-language localization mean moves from ≈59% to ≈68%; weighted readiness ≈49% → ≈50%. Status stays `partial`: engine/OS details, document contents, filenames, CLI/MCP and external help stay outside the catalog by design.
- 
--<<<<<<< HEAD
- - **2026-10-14 (M10, Office to PDF):** Word, PowerPoint and Excel files open as new PDFs, converted natively in `pdfcraft-create` (no office suite or sidecar process, web build included): Word sections, styles, lists, tables, images, headers and footers with page fields; PowerPoint slides with master and layout inheritance, theme colours, shapes, pictures and tables; Excel sheets with number formats, fills, borders and merges. Text uses the standard-14 faces, and what can't be drawn (non-Western characters, charts, vector images) is counted in a report. Reachable from File ▸ Open (converted off the UI thread), Create from multiple files, Combine, batch and `doc_create`. Estimates unchanged.
--=======
-+
- - **2026-10-12 (M6, XML field names):** AcroForm XML data export constrains generated element names to XML 1.0 NCNames, so Latin-1 names such as `Area²` and `Aµ` produce readable data files. Original PDF field names travel through the existing `xfdf:original` attribute; previously valid tags, including Greek and CJK, keep their spelling. Saved-PDF regressions cover invalid prefixes, combining letters and normalized-name collisions. Estimates unchanged.
- - **2026-10-12 (M6, CSV carriage returns):** Form-data CSV export quotes carriage returns in field names and values, so a trailing carriage return cannot turn into a record separator and disappear on reimport. Saved-PDF round-trip regressions cover CR, LF, CRLF, commas and quotes; estimates unchanged.
- - **2026-10-13 (community, M14, #1553 review):** Relative Fontconfig includes resolve beside each including config, including nested configuration selected through `FONTCONFIG_PATH`. Directory includes accept only digit-prefixed `*.conf` in lexical order. Isolated regressions reproduce both review findings; configuration size/count/depth limits, cycles, symlinked config and valid reset ordering are covered. Estimates unchanged.
-@@ -204,7 +205,6 @@ Ranked; detail and the full milestone table in [docs/roadmap.md](docs/roadmap.md
- - **2026-10-14 (M3, control-click candidate):** Coordinate clicks retain hover warmup and pair press/release in one input pass so slow frames do not turn a click into a hold. Text multi-click selection accepts the actual press event when egui has already cleared its origin. Regression cases cover slow-frame button activation, disabled controls and coalesced text selection; estimates unchanged.
- - **2026-10-14 (community, M7, #128 Hebrew in Add text):** Add text and `page_add_text` draw Hebrew with the craft-fonts Hebr face (Noto Sans Hebrew), through the same shaped path as Arabic and Thai: right-to-left display order with numbers and Latin in place, points and cantillation kept on their letter as one Type 3 glyph, ToUnicode and per-line ActualText so extraction, search and the editor get typing order. Builds without the face refuse Hebrew rather than write `?`. Regular style only. Estimates unchanged.
- - **2026-10-14 (M9, #1787):** Changes after signing are judged by the role an object held when signed for a page's resources too: a rewritten font, XObject, graphics state or resources dictionary is page content however its new version is labelled, so a `/FT` or `/Subtype /Widget` added by the attacker no longer reads as a permitted form fill. A category dictionary that only gained a name is judged as before.
-->>>>>>> upstream/main
- - **2026-10-13 (M3, native-opening candidate):** Chosen tools survive preparation, conversion and password retries; startup intake waits for pending preparation. Regression tests cover completion, cancellation and document identity. Estimates unchanged.
- - **2026-10-13 (community, M3, #531 touchpad momentum):** On Wayland a two-finger swipe keeps gliding after the fingers lift and slows to a stop, measured from the gesture's last 0.1 s and decaying with a 0.35 s time constant through the #759 1:1 path. Any wheel input, click, key, zoom or edge ends it (fingers resting on the touchpad don't yet: the vendored winit binds no Wayland hold gestures); single-page paging, macOS (which sends its own momentum), the web, and Animation effects Off never glide. Unit tests for the physics and two headless view tests. Estimates unchanged.
- - **2026-10-13 (M3, native-open admission):** Later prepared replies stay queued while a modal or native picker owns the foreground. Picker completion, cancellation and abandonment wake retained opens. Regressions cover recipient ownership, exactly-once admission, source/history preservation and one-shot repaint requests. Estimates unchanged.
-diff --git a/crates/automation/README.md b/crates/automation/README.md
-index 151103c..69faeaf 100644
---- a/crates/automation/README.md
-+++ b/crates/automation/README.md
-@@ -194,7 +194,6 @@ unapplied with a warning.
- folders. The CLI also exposes it as `pdfcraft-cli batch`. See the
- [batch guide](../../docs/cli-batch.md) for examples, output protection, errors and limits.
- 
--<<<<<<< HEAD
- ## Office documents
- 
- `doc_create` with `from: "office"` and a `path` converts a Word, PowerPoint or Excel file natively
-@@ -202,7 +201,7 @@ folders. The CLI also exposes it as `pdfcraft-cli batch`. See the
- `kind`, `pages`, `escaped` (characters written as `[U+XXXX]`) and `notes` (what was approximated).
- `doc_create_multiple`, `doc_combine` and `doc_batch` convert Office files like images and text. See
- [Word, PowerPoint and Excel to PDF](../../docs/office-import.md).
--=======
-+
- ## Viewer navigation history
- 
- A running PdfCraft instance launched with `--control FILE` exposes its per-tab history through
-@@ -218,4 +217,3 @@ behavior. Back/Forward
- returns to page tops, does not restore zoom, does not switch documents, and is not saved across
- restarts. Standalone engine/MCP sessions have no viewport, so they do not have a separate
- navigation-history tool; use the opt-in UI control channel to navigate the displayed document.
-->>>>>>> upstream/main
-diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
-index 55d513d..068b2a5 100644
---- a/crates/engine/src/lib.rs
-+++ b/crates/engine/src/lib.rs
-@@ -51,14 +51,10 @@ pub use pdfcraft_organize::LabelStyle;
- pub use pdfcraft_organize::view::{InitialView, Layout as InitialLayout, Magnification, Navigation};
- 
- pub use pdfcraft_cos::Algorithm;
--<<<<<<< HEAD
- pub use pdfcraft_create::{
-     CONVERTIBLE, CreateError, ImageResolution, OFFICE_EXTENSIONS, OfficeKind, OfficeReport, SourceKind, decode_text, source_kind,
- };
--=======
--pub use pdfcraft_create::{CONVERTIBLE, CreateError, ImageResolution, SourceKind, decode_text, source_kind};
- pub use pdfcraft_edit::added::{text_rect as added_text_rect, text_width as added_text_width};
-->>>>>>> upstream/main
- pub use pdfcraft_edit::{
-     Added, AddedImage, AddedText, Align as TextAlign, Background, Content as AddedContent, Family as FontFamily, HeaderFooter, MarkKind, Watermark,
- };
-diff --git a/crates/redact/Cargo.toml b/crates/redact/Cargo.toml
-index 4959385..abe3561 100644
---- a/crates/redact/Cargo.toml
-+++ b/crates/redact/Cargo.toml
-@@ -18,6 +18,7 @@ pdfcraft-edit = { workspace = true }
- pdfcraft-annot = { workspace = true }
- pdfcraft-xfa = { workspace = true }
- thiserror = { workspace = true }
-+image = { version = "0.25", default-features = false, features = ["jpeg"] }
- 
- [dev-dependencies]
- pdfcraft-testkit = { workspace = true }
-diff --git a/crates/redact/README.md b/crates/redact/README.md
-index 3b2d54e..4c5c164 100644
---- a/crates/redact/README.md
-+++ b/crates/redact/README.md
-@@ -19,7 +19,10 @@ clear_marks(&mut doc, None)?;                        // remove marks without app
-   inside;
- - **images**: fully covered → removed; partly covered → a copy with the covered pixels cleared
-   (8/16-bit and 1/2/4-bit images, image masks; Flate/LZW/RL/A85/AHx). Codecs PdfCraft can't
--  re-encode (DCT, JPX, JBIG2, CCITT) are removed whole (fail-closed); inline images under an
-+  re-encode (JPX, JBIG2, CCITT) are removed whole (fail-closed). Plain 8-bit DeviceGray/DeviceRGB
-+  JPEGs are decoded, cleared and written as Flate: uncovered decoded samples stay exact and
-+  JPEG application segments are discarded. CMYK, complex color spaces, explicit DCT decode
-+  parameters and inconsistent dimensions are still removed whole; inline images under an
-   area are removed. Images with separate `/SMask` or `/Mask` data are removed whole;
-   cleared copies drop `/Alternates` so alternate pixels cannot survive;
- - **vectors**: covered paths are removed; partly covered paths and shadings are clipped so
-@@ -70,4 +73,4 @@ Security numbers and dates for Search & Redact.
- Custom code sets aren't supported yet.
- 
- Not yet: pattern locales, struct-tree/alt-text cleanup, metadata and hidden-information
--sanitising (M8.4), re-encoding of DCT images (they are removed instead).
-+sanitising (M8.4), partial clearing of CMYK/complex DCT, JPX, JBIG2 and CCITT images.
-diff --git a/crates/redact/src/image.rs b/crates/redact/src/image.rs
-index 23ef255..0065811 100644
---- a/crates/redact/src/image.rs
-+++ b/crates/redact/src/image.rs
-@@ -1,9 +1,11 @@
- //! Clearing the pixels of an image under redaction regions. The image is decoded, every pixel
- //! whose centre maps into a region is set to zero (no ink for image masks), and the result is
- //! written as a new Flate image; the original object is untouched (other pages may use it).
--//! Images whose codec PdfCraft can't decode (DCT, JPX, JBIG2, CCITT) return `None`, and the
-+//! Gray/RGB JPEGs are decoded to samples and saved losslessly, without JPEG application data.
-+//! Images whose codec PdfCraft can't decode (JPX, JBIG2, CCITT) return `None`, and the
- //! caller removes the whole image instead; that is fail-closed.
- 
-+use ::image::ImageDecoder;
- use pdfcraft_content::{Matrix, overlaps};
- use pdfcraft_cos::{Document, Object, Stream};
- 
-@@ -45,6 +47,11 @@ fn decode_and_clear(doc: &Document, s: &Stream, ctm: &Matrix, rects: &[[f64; 4]]
-     if s.dict.contains(b"SMask") || s.dict.contains(b"Mask") {
-         return None;
-     }
-+    let jpeg = match s.dict.get(b"Filter") {
-+        Some(Object::Name(n)) => n == b"DCTDecode" || n == b"DCT",
-+        Some(Object::Array(a)) if a.len() == 1 => matches!(a.first()?.as_name(), Some(b"DCTDecode" | b"DCT")),
-+        _ => false,
-+    };
-     let supported = |n: &[u8]| {
-         matches!(
-             n,
-@@ -57,11 +64,11 @@ fn decode_and_clear(doc: &Document, s: &Stream, ctm: &Matrix, rects: &[[f64; 4]]
-         Some(Object::Array(a)) => a.iter().all(|f| f.as_name().is_some_and(supported)),
-         _ => false,
+diff --git a/crates/create/src/office/xlsx.rs b/crates/create/src/office/xlsx.rs
+index deb934c..7569c51 100644
+--- a/crates/create/src/office/xlsx.rs
++++ b/crates/create/src/office/xlsx.rs
+@@ -84,7 +84,8 @@ fn color(n: Node<'_, '_>, theme: &[[f64; 3]]) -> Option<[f64; 3]> {
+         hex_color(rgb)?
+     } else if let Some(t) = attr_f64(n, "theme") {
+         *theme.get(t.clamp(0.0, 64.0) as usize)?
+-    } else if let Some(i) = attr_f64(n, "indexed") {
++    } else {
++        let i = attr_f64(n, "indexed")?;
+         let i = i.clamp(0.0, 100.0) as usize;
+         if i == 64 {
+             // System foreground.
+@@ -93,8 +94,6 @@ fn color(n: Node<'_, '_>, theme: &[[f64; 3]]) -> Option<[f64; 3]> {
+             let v = *INDEXED.get(i)?;
+             [((v >> 16) & 0xFF) as f64 / 255.0, ((v >> 8) & 0xFF) as f64 / 255.0, (v & 0xFF) as f64 / 255.0]
+         }
+-    } else {
+-        return None;
      };
--    if !ok {
-+    if !ok && !jpeg {
-         return None;
-     }
-     let (w, h) = (s.dict.int(b"Width")?, s.dict.int(b"Height")?);
--    if w <= 0 || h <= 0 || (w as u64) * (h as u64) > MAX_PIXELS {
-+    if w <= 0 || h <= 0 || (w as u64).checked_mul(h as u64)? > MAX_PIXELS {
-         return None;
-     }
-     let (w, h) = (w as usize, h as usize);
-@@ -77,7 +84,10 @@ fn decode_and_clear(doc: &Document, s: &Stream, ctm: &Matrix, rects: &[[f64; 4]]
-     let bytes = row.checked_mul(h)?;
-     let row_bits = row.checked_mul(8)?;
-     bytes.checked_mul(8)?;
--    let mut data = s.decoded().ok()?;
-+    if bytes > (MAX_PIXELS as usize).checked_mul(8)? {
-+        return None;
-+    }
-+    let mut data = if jpeg { jpeg_samples(doc, s, w, h, ncomp, bpc)? } else { s.decoded_within(bytes).ok()? };
-     if data.len() < bytes {
-         return None;
-     }
-@@ -128,3 +138,81 @@ fn decode_and_clear(doc: &Document, s: &Stream, ctm: &Matrix, rects: &[[f64; 4]]
-     dict.remove(b"Alternates");
-     Some(Some(Stream::flate(dict, &data)))
- }
-+
-+/// Restrict the JPEG path to color spaces whose decoded samples retain the PDF semantics.
-+/// Explicit DCT ColorTransform and complex color spaces stay fail-closed until supported.
-+fn jpeg_samples(doc: &Document, s: &Stream, w: usize, h: usize, channels: usize, bpc: usize) -> Option<Vec<u8>> {
-+    let cs = doc.resolve(s.dict.get(b"ColorSpace")?);
-+    let expected = match cs.as_name()? {
-+        b"DeviceGray" | b"G" => ::image::ColorType::L8,
-+        b"DeviceRGB" | b"RGB" => ::image::ColorType::Rgb8,
-+        _ => return None,
-+    };
-+    if bpc != 8
-+        || s.dict.contains(b"DecodeParms")
-+        || s.dict.contains(b"ImageMask")
-+        || s.raw.len() > (MAX_PIXELS as usize) * 4
-+        || jpeg_components(&s.raw)? != channels
-+    {
-+        return None;
-+    }
-+    let size = w.checked_mul(h)?.checked_mul(channels)?;
-+    let mut reader = ::image::ImageReader::with_format(std::io::Cursor::new(s.raw.as_ref()), ::image::ImageFormat::Jpeg);
-+    let mut limits = ::image::Limits::default();
-+    limits.max_image_width = Some(u32::try_from(w).ok()?);
-+    limits.max_image_height = Some(u32::try_from(h).ok()?);
-+    limits.max_alloc = Some(MAX_PIXELS * 4);
-+    reader.limits(limits);
-+    let decoder = reader.into_decoder().ok()?;
-+    if decoder.dimensions() != (u32::try_from(w).ok()?, u32::try_from(h).ok()?)
-+        || decoder.color_type() != expected
-+        || decoder.original_color_type() != expected.into()
-+        || decoder.total_bytes() != size as u64
-+    {
-+        return None;
-+    }
-+    let mut pixels = Vec::new();
-+    pixels.try_reserve_exact(size).ok()?;
-+    pixels.resize(size, 0);
-+    decoder.read_image(&mut pixels).ok()?;
-+    Some(pixels)
-+}
-+
-+/// `image` converts CMYK JPEGs to RGB. Check the encoded component count first, so that
-+/// even a PDF incorrectly declaring DeviceRGB cannot silently reinterpret those samples.
-+fn jpeg_components(bytes: &[u8]) -> Option<usize> {
-+    if !bytes.starts_with(&[0xff, 0xd8]) {
-+        return None;
-+    }
-+    let mut pos = 2usize;
-+    while pos < bytes.len() {
-+        if *bytes.get(pos)? != 0xff {
-+            return None;
-+        }
-+        while bytes.get(pos) == Some(&0xff) {
-+            pos = pos.checked_add(1)?;
-+        }
-+        let marker = *bytes.get(pos)?;
-+        pos = pos.checked_add(1)?;
-+        if matches!(marker, 0xd9 | 0xda) {
-+            return None;
-+        }
-+        if marker == 0x01 || (0xd0..=0xd7).contains(&marker) {
-+            continue;
-+        }
-+        let length = u16::from_be_bytes([*bytes.get(pos)?, *bytes.get(pos.checked_add(1)?)?]) as usize;
-+        if length < 2 {
-+            return None;
-+        }
-+        let end = pos.checked_add(length)?;
-+        let segment = bytes.get(pos.checked_add(2)?..end)?;
-+        if matches!(marker, 0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf) {
-+            if segment.first() != Some(&8) {
-+                return None;
-+            }
-+            return Some(usize::from(*segment.get(5)?));
-+        }
-+        pos = end;
-+    }
-+    None
-+}
-diff --git a/crates/redact/src/tests.rs b/crates/redact/src/tests.rs
-index b9a230f..6d5af43 100644
---- a/crates/redact/src/tests.rs
-+++ b/crates/redact/src/tests.rs
-@@ -250,6 +250,83 @@ fn images_are_removed_or_have_their_pixels_cleared() {
-     assert_eq!(orig.decoded().unwrap(), [255; 4], "the shared original is untouched");
- }
- 
-+/// Generated pixels only: no external fixture, font or JPEG metadata is required.
-+fn jpeg_fixture(gray: bool) -> Vec<u8> {
-+    let mut bytes = Vec::new();
-+    let channels = if gray { 1 } else { 3 };
-+    let pixels: Vec<u8> = (0..8 * 4 * channels).map(|i| (80 + i % 150) as u8).collect();
-+    let color = if gray { ::image::ExtendedColorType::L8 } else { ::image::ExtendedColorType::Rgb8 };
-+    ::image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 95).encode(&pixels, 8, 4, color).unwrap();
-+    // An APP1 payload stands in for a thumbnail or private camera metadata. It must not survive.
-+    let marker = b"PRIVATE-JPEG-METADATA";
-+    let mut app = vec![0xff, 0xe1];
-+    app.extend_from_slice(&((marker.len() + 2) as u16).to_be_bytes());
-+    app.extend_from_slice(marker);
-+    bytes.splice(2..2, app);
-+    bytes
-+}
-+
-+#[test]
-+fn jpeg_redaction_preserves_uncovered_samples_and_retires_original_after_save() {
-+    for gray in [false, true] {
-+        let jpeg = jpeg_fixture(gray);
-+        let decoded = ::image::load_from_memory_with_format(&jpeg, ::image::ImageFormat::Jpeg).unwrap().into_bytes();
-+        let cs = if gray { "DeviceGray" } else { "DeviceRGB" };
-+        let filter = if gray { "[/DCTDecode]" } else { "/DCTDecode" };
-+        let img = stream(&format!("/Type /XObject /Subtype /Image /Width 8 /Height 4 /ColorSpace /{cs} /BitsPerComponent 8 /Filter {filter}"), &jpeg);
-+        let mut doc = one_page(b"q 80 0 0 40 100 100 cm /Im1 Do Q", "/XObject << /Im1 7 0 R >>", vec![img]);
-+        mark(&mut doc, 0, &[[100.0, 100.0, 140.0, 140.0]], "");
-+        let report = apply(&mut doc, None).unwrap();
-+        assert_eq!((report.images_removed, report.images_cleared), (0, 1));
-+        let bytes = write_full(&doc, &SaveOptions::default()).unwrap();
-+        assert!(!bytes.windows(jpeg.len()).any(|w| w == jpeg));
-+        assert!(!bytes.windows(21).any(|w| w == b"PRIVATE-JPEG-METADATA"));
-+        let saved = Document::open(Arc::new(bytes)).unwrap();
-+        let page = pdfcraft_model::pages(&saved).remove(0);
-+        let resources = saved.resolve(page.dict.get(b"Resources").unwrap());
-+        let xobjects = saved.resolve(resources.as_dict().unwrap().get(b"XObject").unwrap());
-+        let xo = xobjects.as_dict().unwrap();
-+        assert!(!xo.contains(b"Im1"));
-+        let (_, reference) = xo.iter().find(|(name, _)| name.starts_with(b"PCRedacted")).unwrap();
-+        let object = saved.resolve(reference);
-+        let Object::Stream(copy) = &*object else { panic!("expected image") };
-+        assert_eq!(copy.dict.name(b"Filter"), Some(&b"FlateDecode"[..]));
-+        let actual = copy.decoded().unwrap();
-+        let channels = if gray { 1 } else { 3 };
-+        let mut expected = decoded;
-+        for y in 0..4 {
-+            expected[y * 8 * channels..(y * 8 + 4) * channels].fill(0);
-+        }
-+        assert_eq!(actual, expected, "uncovered decoded samples must remain exact");
-+    }
-+}
-+
-+#[test]
-+fn jpeg_redaction_rejects_inconsistent_dimensions_and_color_spaces() {
-+    let jpeg = jpeg_fixture(false);
-+    for (width, height, cs, bpc, extra) in [
-+        (9i64, 4, "DeviceRGB", 8, ""),
-+        (8, 4, "DeviceGray", 8, ""),
-+        (8, 4, "DeviceCMYK", 8, ""),
-+        (8, 4, "DeviceRGB", 16, ""),
-+        (i64::MAX, i64::MAX, "DeviceRGB", 8, ""),
-+        (8, 4, "DeviceRGB", 8, "/DecodeParms << /ColorTransform 0 >>"),
-+    ] {
-+        let img = stream(
-+            &format!(
-+                "/Type /XObject /Subtype /Image /Width {width} /Height {height} /ColorSpace /{cs} /BitsPerComponent {bpc} /Filter /DCTDecode {extra}"
-+            ),
-+            &jpeg,
-+        );
-+        let mut doc = one_page(b"q 80 0 0 40 100 100 cm /Im1 Do Q", "/XObject << /Im1 7 0 R >>", vec![img]);
-+        mark(&mut doc, 0, &[[100.0, 100.0, 140.0, 140.0]], "");
-+        let report = apply(&mut doc, None).unwrap();
-+        assert_eq!((report.images_removed, report.images_cleared), (1, 0));
-+        let bytes = write_full(&doc, &SaveOptions::default()).unwrap();
-+        assert!(!bytes.windows(jpeg.len()).any(|w| w == jpeg));
-+    }
-+}
-+
- #[test]
- fn vectors_are_removed_or_clipped_and_inline_images_go() {
-     let src = b"0 g 10 10 20 20 re f 0 0 300 300 re f q 10 0 0 10 50 50 cm BI /W 1 /H 1 /CS /G /BPC 8 ID \x80 EI Q 1 0 0 RG 150 150 m 160 160 l S";
+     if let Some(t) = attr_f64(n, "tint").filter(|t| t.is_finite()) {
+         let t = t.clamp(-1.0, 1.0);
 diff --git a/crates/ui-egui/src/i18n/vi.tsv b/crates/ui-egui/src/i18n/vi.tsv
-index a01b47f..a595fd1 100644
+index 4d075ca..7fb4b08 100644
 --- a/crates/ui-egui/src/i18n/vi.tsv
 +++ b/crates/ui-egui/src/i18n/vi.tsv
-@@ -2615,3 +2615,6 @@ key	Space	Space
+@@ -2615,11 +2615,9 @@ key	Space	Space
  	Redact Image	Xóa nội dung nhạy cảm của hình ảnh
  	Create Link…	Tạo liên kết…
  	Recognize Text…	Nhận dạng văn bản…
-+	Word, PowerPoint and Excel (converted to PDF)	Word, PowerPoint và Excel (chuyển đổi sang PDF)
-+	PDF, images, text and Office documents	PDF, hình ảnh, văn bản và tài liệu Office
-+	Converted {name}. Approximated: {notes}	Đã chuyển đổi {name}. Nội dung được tái tạo gần đúng: {notes}
-diff --git a/parity/acrobat-features.toml b/parity/acrobat-features.toml
-index ceb6328..fa29393 100644
---- a/parity/acrobat-features.toml
-+++ b/parity/acrobat-features.toml
-@@ -5570,7 +5570,7 @@ status = "shipped"
- commands = ["redact.mark"]
- tools = ["redact_mark"]
- evidence = ["crates/ui-egui/tests/ui_group/redact.rs::marking_applying_and_clearing", "crates/redact/src/tests.rs::images_are_removed_or_have_their_pixels_cleared"]
--notes = "drag a box anywhere else"
-+notes = "drag a box anywhere else; plain 8-bit gray/RGB JPEGs preserve uncovered decoded samples with Flate output; CMYK/complex spaces and unsupported masks/codecs still fail closed"
+-<<<<<<< HEAD
+ 	Word, PowerPoint and Excel (converted to PDF)	Word, PowerPoint và Excel (chuyển đổi sang PDF)
+ 	PDF, images, text and Office documents	PDF, hình ảnh, văn bản và tài liệu Office
+ 	Converted {name}. Approximated: {notes}	Đã chuyển đổi {name}. Nội dung được tái tạo gần đúng: {notes}
+-=======
  
- [[feature]]
- id = "protect.redact-pages"
+ # AI-assisted additions for concurrently merged UI features (2026-10-15).
+ # These additions have not had separate native-speaker review.
+@@ -2686,4 +2684,3 @@ key	Space	Space
+ 	Words	Từ
+ 	“{name}” changed on disk after it was opened or last saved. Saving now replaces that newer version with this one.	“{name}” đã thay đổi trên đĩa sau khi được mở hoặc lưu lần cuối. Lưu lúc này sẽ thay thế phiên bản mới hơn đó bằng phiên bản này.
+ @id	file.word_count	Đếm từ…
+->>>>>>> upstream/main
+diff --git a/crates/ui-egui/tests/editing.rs b/crates/ui-egui/tests/editing.rs
+index f8db525..794c299 100644
+--- a/crates/ui-egui/tests/editing.rs
++++ b/crates/ui-egui/tests/editing.rs
+@@ -1372,7 +1372,8 @@ fn files_that_cannot_be_read_are_listed_and_left_out_once_the_user_agrees() {
+         assert!(why.starts_with("Can't be read: ") && !why.contains(&f.name), "{why}");
+         assert!(f.lock.is_none() && f.pages == 0);
+     }
+-    h.get_by_label_contains("this file type can't be converted");
++    // Word is supported now; this truncated package is refused for its damaged directory.
++    h.get_by_label_contains("the package's directory is missing");
+     // One readable file is not enough to combine.
+     assert!(h.get_by_label("Combine").accesskit_node().is_disabled());
+     h.state_mut().use_files(pdfcraft_ui_egui::FilePurpose::Combine, vec![("two.pdf".into(), fixture(1))]);
