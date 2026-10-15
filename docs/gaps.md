@@ -1,5 +1,7 @@
 # Where PdfCraft falls short of Acrobat Pro
 
+> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-13 · **Change:** minor (gap 14: Vietnamese catalog shipped; Hindi/Indonesian/Korean and Arabic RTL remain) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
+> **Last reviewed:** 2026-10-13 · **Last updated:** 2026-10-13 · **Change:** minor (gap 6: #1910 Organize Pages opens on the current page; estimates unchanged) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
 > **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (gap 6: #1398 stamps read upright on rotated pages; estimates unchanged) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
 > **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (gap 6: #1317, #1327, #1302, #1315 and #1340; estimates unchanged) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
 > **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-12 · **Change:** minor (#1316: replacing a line keeps a neighbouring line whose glyph box overlaps; gap 3 remains) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
@@ -32,13 +34,13 @@ update the numbers.
 | 5 | Chinese UI shows missing-glyph boxes in releases | localization | 6–12 | [localization-parity.md](localization-parity.md) |
 | 6 | Open-issue backlog of wrong results in shipped features | stability | 45–80 | this file |
 | 7 | OCR reads only unaccented Latin | feature | 40–75 | [file-format-parity.md](file-format-parity.md) |
-| 8 | Office export weak, Office import absent | file format | 55–100 | [file-format-parity.md](file-format-parity.md) |
+| 8 | Office export weak, Office import requires LibreOffice | file format | 55–100 | [file-format-parity.md](file-format-parity.md) |
 | 9 | No Preflight; PDF/A partial; PDF/X and PDF/UA absent | standards | 65–115 | [pdf-spec-parity.md](pdf-spec-parity.md) |
 | 10 | Signatures: no PKCS #11, timestamp servers or online revocation | feature, hardware | 40–70 | [pdf-spec-parity.md](pdf-spec-parity.md) |
 | 11 | Accessibility: checker only, no tagging tools | feature | 40–70 | [target-app-parity.md](target-app-parity.md) |
 | 12 | No measured fidelity harness against Acrobat | quality | (in 2) | [target-app-parity.md](target-app-parity.md) |
 | 13 | Performance budgets and lazy loading of very large files | performance | 25–45 | this file |
-| 14 | Arabic not mirrored; no Hindi, Indonesian, Korean, Vietnamese | localization | 30–50 | [localization-parity.md](localization-parity.md) |
+| 14 | Arabic not mirrored; no Hindi, Indonesian, Korean | localization | 25–45 | [localization-parity.md](localization-parity.md) |
 | 15 | Forms: JavaScript object model, actions, submit, XFA depth | feature | 40–75 | [pdf-spec-parity.md](pdf-spec-parity.md) |
 | 16 | UI precision gaps (multi-select move, rulers, accelerators, windows) | UI/UX | 30–60 | [ui-parity.md](ui-parity.md) |
 | 17 | Certificate security and other protect gaps | feature, spec | 15–30 | [pdf-spec-parity.md](pdf-spec-parity.md) |
@@ -128,14 +130,15 @@ update the numbers.
 - **Missing:** fixes for the ≈ 13 of ≈ 25 filed reports of features marked `shipped` that give wrong results still open,
   plus triage of ≈ 220 other open issues.
 - **Evidence:** 245 open issues on 2026-10-10. The first batch of `fix(...)` reports was fixed by
-  2026-10-10 (#799, #800, #807, #809, #810, #811, #815, #816, #817, #818, #819, #821). Stamps placed
-  on a rotated page read upright: rubber stamps, natural-size and explicit-rectangle images, and
-  PDF-page stamps (#1398). The rest of the backlog is untriaged.
   2026-10-10 (#799, #800, #807, #809, #810, #811, #815, #816, #817, #818, #819, #821). A later
   batch keeps a cloudy comment flatten cannot draw (#1317), leaves a refused text-box restyle or
   resize unchanged (#1327), keeps arrow defaults off plain lines (#1302), stops a custom text
   match on the separator instead of the next glyph (#1315), and states the vertical-text
-  redaction refusal without claiming an overlap (#1340). The rest of the backlog is untriaged.
+  redaction refusal without claiming an overlap (#1340). Organize Pages opens on the page being
+  read, selected and scrolled into view (#1910). Stamps placed on a rotated page read upright
+  (#1398). Another batch keeps a spaced XFA radio value in the datasets (#1319), replaces only the
+  selected pages when they are not adjacent (#1305), and leaves unrelated page streams in place
+  when a figure is marked decorative (#1324). The rest of the backlog is untriaged.
 - **Impact:** every one is a user who lost trust. Crash reports outrank feature work
   (`AGENTS.md` §4).
 - **Estimate:** 45–80 h (≈ 0.2–0.4 h per issue). **Doc:** this file.
@@ -152,15 +155,15 @@ update the numbers.
 - **Estimate:** 40–75 h, partly blocked on openly licensed models. **Doc:**
   [file-format-parity.md](file-format-parity.md).
 
-### 8. Office export weak, Office import absent
+### 8. Office export weak, Office import requires LibreOffice
 
-- **Missing:** Word export that keeps layout; Excel and PowerPoint export; creating PDFs from Office,
+- **Missing:** Word export that keeps layout; Excel and PowerPoint export; native Office import without an external application,
   HTML, web pages and PostScript; SVG/XML/EPS/PS/JPEG 2000 export.
 - **Evidence:** `create.export-docx` partial; the synthetic invoice regression for
   [#773](https://github.com/storytold/pdfcraft/issues/773) now covers absent inferred borders,
   floating watermark text and per-page section sizes. Exact font matching, vector rules and
   broader layout fidelity remain incomplete;
-  `create.export-xlsx`, `create.export-pptx`, `create.from-office`, `create.from-html` planned.
+  `create.from-office` now has optional desktop LibreOffice import, tested for ten formats on Windows/Linux and through the UI on Linux; web and confined sessions are unsupported. Office export fidelity and the remaining format gaps still apply.
 - **Impact:** "Export PDF" and "Create PDF" are two of Acrobat's most used tools.
 - **Gate:** lossy or missing sub-cases of the convert-and-share workflow (partial, not blocking).
   First beta items: Create PDF from Office (LibreOffice sidecar, 10–20 h) and a Word export that
@@ -195,8 +198,10 @@ update the numbers.
 
 ### 11. Accessibility: only text-only automatic structure creation
 
-- **Missing:** auto-tag mixed text, images, tables, lists, links and fields; connect preview heading
-  proposals to Apply; visual Order and Content panels, Reading Order tool, table editor, Make Accessible action,
+- **Missing:** apply auto-tag proposals to marked content and a valid parent tree, tag fields
+  into structure trees with unusual layouts (only a direct Document root with a direct
+  ParentTree Nums array is extended),
+  visual Tags, Order and Content panels, Reading Order tool, table editor, Make Accessible action,
   Read Out Loud; full keyboard operation of PdfCraft itself and a screen-reader audit.
 - **Evidence:** all 32 checker rules, figure alt text, tag property and sibling order edits, and
   a bounded auto-tag preview exist. Apply writes valid structure and parent-tree links for
@@ -221,6 +226,27 @@ update the numbers.
   CI, and a first reading of a borrowed renderer is a baseline to improve on, not a bar to clear.
   The worst results cluster on JBIG2 `bitmap-*` files (`hayro-jbig2` carries 3 local patches) and
   on ZapfDingbats, which points the renderer work at something specific for the first time.
+- **Read the score as a disagreement, not a verdict (2026-10-14).** The worst file of the 250,
+  `bug1552113.pdf` at 84%, turned out to be Poppler's defect: it paints the link's `/Border [0 0
+  112]` as a 112-unit band over the two lines of text, and the fixture is named "this text should
+  be visible". Ours is the readable rendering. Anything at the top of the list needs a person to
+  look at both images before it is treated as a bug of ours.
+- **The JBIG2 cluster was Poppler too, and the suite checks itself (2026-10-14).** The next four
+  worst files were JBIG2, which looked like a defect in `hayro-jbig2` and its local patches. It is
+  the reverse. The 96 `bitmap-*.pdf` fixtures are a conformance suite: one picture encoded through
+  every corner of JBIG2, so a correct decoder renders all 96 identically — a real test needing no
+  reference image and no oracle. **We render 1 distinct image across all 96; Poppler renders 8**,
+  drawing a blank page for the seven halftone-skip and symbol fixtures and mis-decoding TPGRON
+  refinement (its output changes when TPGRON is switched on, which a correct decoder's cannot).
+  Pinned as `crates/render/tests/jbig2_invariants.rs`. **Poppler is not a usable oracle for JBIG2**,
+  and roughly a fifth of its fixtures should be read as its bugs rather than ours.
+- **Annotations are shown, and that was measured rather than argued.** Poppler synthesises an
+  appearance for an annotation that has none, where we draw only what the document carries (link
+  borders without `/AP` are recorded as not covered under `view.render-annotation-appearances`), so
+  showing them scores us for a known gap. Hiding them is worse, because it then scores Poppler for
+  every appearance we *do* draw: over the same 250 files, shown gives mean 2.16% / p90 5.35% / 25
+  files within 0.1%, hidden gives 2.18% / 5.55% / 22, with `annotation-tx3.pdf` jumping to 45.64%.
+  The biases nearly cancel; `--hide-annotations` tells the two apart for one file at a time.
 - **Evidence:** text extraction (word-F1 0.98 against `pdftotext`) and now rendering (above); qpdf
   checks written output on every CI run since `PDFCRAFT_ORACLES_REQUIRED`. Acrobat captures must
   stay local in `plan/acrobat/` (clean-room, `AGENTS.md` §1.1).
@@ -251,14 +277,15 @@ update the numbers.
   to edit.
 - **Estimate:** 25–45 h. **Doc:** this file.
 
-### 14. Arabic not mirrored; no Hindi, Indonesian, Korean, Vietnamese
+### 14. Arabic not mirrored; no Hindi, Indonesian, Korean
 
 - **Missing:** a right-to-left layout (panels, menus, alignment), bidirectional text in the text
-  layout itself (wrapping, typed text); catalogs for Hindi, Indonesian, Korean and Vietnamese
-  (Acrobat ships Korean; it ships Arabic in its Middle East edition; it ships none of the other
-  three).
+  layout itself (wrapping, typed text); catalogs for Hindi, Indonesian and Korean (Acrobat ships
+  Korean; it ships Arabic in its Middle East edition; it ships none of Hindi or Indonesian).
+  Vietnamese ships as a catalog (`vi`, 100% of the current localizable union) but stays `partial`
+  like other non-English languages (no translated help; engine/OS details stay English).
 - **Evidence:** [localization.md](localization.md) §Arabic; `misc.rtl-ui` planned.
-- **Estimate:** 30–50 h (Arabic RTL 20–35, four catalogs 10–15 plus review). **Doc:**
+- **Estimate:** 25–45 h (Arabic RTL 20–35, three catalogs 8–12 plus review). **Doc:**
   [localization-parity.md](localization-parity.md).
 
 ### 15. Forms: JavaScript object model, actions, submit, XFA depth
@@ -331,14 +358,16 @@ update the numbers.
 
 - **Missing:** a menu and tool listing captured from Acrobat (names only, `plan/acrobat/`, never
   committed) diffed against the checklist, so that features the checklist never listed show up.
-  Also correct `misc.localization` and `misc.installers`, which are still `planned` though both
-  ship.
+  `misc.localization` and `misc.installers` are now `partial` (Chinese, Telugu and Arabic are not
+  fully usable yet; Linux packages are unsigned).
 - **Estimate:** 4–8 h. **Doc:** [target-app-parity.md](target-app-parity.md).
 
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-15 | patch | Gap 24: record localization and installers as partial (unusable Chinese, Telugu and Arabic; unsigned Linux packages) |
+| 2026-10-13 | minor | Gap 6: Organize Pages selects and reveals the current page on open, including after an earlier grid selection elsewhere (#1910). Estimates unchanged. |
 | 2026-10-12 | minor | Gap 6: rubber stamps, explicit image rectangles and PDF-page stamps read upright on rotated pages (#1398). Estimates unchanged. |
 | 2026-10-12 | minor | #1316: replacing a line or paragraph keeps a neighbouring line whose glyph box overlaps. Gap 3 remains. Estimates unchanged. |
 | 2026-10-12 | minor | Exclusive image crops resize with their pixels across nested states, intervening operators and content streams; shared clips remain fixed. Synthetic engine/tool regressions and private image save/reopen checks; estimates unchanged. |

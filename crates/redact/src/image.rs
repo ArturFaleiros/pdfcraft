@@ -25,9 +25,9 @@ fn components(doc: &Document, s: &Stream) -> Option<usize> {
         b"DeviceRGB" | b"RGB" | b"CalRGB" | b"Lab" => 3,
         b"DeviceCMYK" | b"CMYK" => 4,
         b"ICCBased" => {
-            // /N lives in the ICC profile stream.
+            // /N lives in the ICC profile stream, and shall be 1, 3 or 4 (ISO 32000-2 §8.6.5.5).
             match &*doc.resolve(cs.as_array()?.get(1)?) {
-                Object::Stream(icc) => icc.dict.int(b"N")? as usize,
+                Object::Stream(icc) => usize::try_from(icc.dict.int(b"N")?).ok().filter(|n| matches!(n, 1 | 3 | 4))?,
                 _ => return None,
             }
         }
@@ -43,6 +43,10 @@ pub(crate) fn clear(doc: &Document, s: &Stream, ctm: &Matrix, rects: &[[f64; 4]]
 }
 
 fn decode_and_clear(doc: &Document, s: &Stream, ctm: &Matrix, rects: &[[f64; 4]]) -> Option<Option<Stream>> {
+    // Separate masks can retain the original image data.
+    if s.dict.contains(b"SMask") || s.dict.contains(b"Mask") {
+        return None;
+    }
     let jpeg = match s.dict.get(b"Filter") {
         Some(Object::Name(n)) => n == b"DCTDecode" || n == b"DCT",
         Some(Object::Array(a)) if a.len() == 1 => matches!(a.first()?.as_name(), Some(b"DCTDecode" | b"DCT")),
@@ -73,18 +77,21 @@ fn decode_and_clear(doc: &Document, s: &Stream, ctm: &Matrix, rects: &[[f64; 4]]
     if !matches!(bpc, 1 | 2 | 4 | 8 | 16) {
         return None;
     }
-    let row = w.checked_mul(ncomp)?.checked_mul(bpc)?.div_ceil(8);
-    let size = row.checked_mul(h)?;
-    // The clearing loop addresses bits; its offsets must fit on 32-bit targets too.
-    size.checked_mul(8)?;
-    if size > (MAX_PIXELS as usize).checked_mul(8)? {
+    // Every size comes from the file: multiply checked, so an overflowing product refuses the image
+    // instead of sizing the writes below.
+    let bits_per_pixel = ncomp.checked_mul(bpc)?;
+    let row = w.checked_mul(bits_per_pixel)?.div_ceil(8);
+    let bytes = row.checked_mul(h)?;
+    let row_bits = row.checked_mul(8)?;
+    bytes.checked_mul(8)?;
+    if bytes > (MAX_PIXELS as usize).checked_mul(8)? {
         return None;
     }
-    let mut data = if jpeg { jpeg_samples(doc, s, w, h, ncomp, bpc)? } else { s.decoded_within(size).ok()? };
-    if data.len() < size {
+    let mut data = if jpeg { jpeg_samples(doc, s, w, h, ncomp, bpc)? } else { s.decoded_within(bytes).ok()? };
+    if data.len() < bytes {
         return None;
     }
-    data.truncate(size);
+    data.truncate(bytes);
     // Image masks: a sample of 0 paints unless /Decode is [1 0]; cleared samples must not paint.
     let clear_bit = if mask {
         let inverted = s.dict.get(b"Decode").and_then(Object::as_array).and_then(|d| d.first()).and_then(Object::as_f64) == Some(1.0);
@@ -92,7 +99,6 @@ fn decode_and_clear(doc: &Document, s: &Stream, ctm: &Matrix, rects: &[[f64; 4]]
     } else {
         false
     };
-    let bits_per_pixel = ncomp * bpc;
     let mut cleared = 0usize;
     for j in 0..h {
         // Image space: (0,0) is the bottom-left of the unit square; row 0 is the top.
@@ -110,13 +116,15 @@ fn decode_and_clear(doc: &Document, s: &Stream, ctm: &Matrix, rects: &[[f64; 4]]
                 continue;
             }
             cleared += 1;
-            let start = j * row * 8 + i * bits_per_pixel;
+            // `bytes * 8` fits, and every bit index is below it, so this arithmetic can't overflow.
+            let start = j * row_bits + i * bits_per_pixel;
             for bit in start..start + bits_per_pixel {
                 let (byte, shift) = (bit / 8, 7 - bit % 8);
+                let b = data.get_mut(byte)?;
                 if clear_bit {
-                    *data.get_mut(byte)? |= 1 << shift;
+                    *b |= 1 << shift;
                 } else {
-                    *data.get_mut(byte)? &= !(1 << shift);
+                    *b &= !(1 << shift);
                 }
             }
         }
@@ -127,6 +135,7 @@ fn decode_and_clear(doc: &Document, s: &Stream, ctm: &Matrix, rects: &[[f64; 4]]
     let mut dict = s.dict.clone();
     dict.remove(b"Length");
     dict.remove(b"DecodeParms");
+    dict.remove(b"Alternates");
     Some(Some(Stream::flate(dict, &data)))
 }
 

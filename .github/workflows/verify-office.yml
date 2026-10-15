@@ -96,7 +96,7 @@ jobs:
       - name: Office conversion tool integration
         shell: bash
         run: |
-          export PDFCRAFT_OFFICE_TEST_INPUT="$GITHUB_WORKSPACE/validation-output/office.docx"
+          export PDFCRAFT_OFFICE_TEST_INPUT="$GITHUB_WORKSPACE/target/validation-output/office.docx"
           cargo test -p pdfcraft-automation office_conversion_opens_a_new_unsaved_pdf -- --ignored
       - name: Office conversion in the real UI
         if: runner.os == 'Linux'
@@ -105,18 +105,18 @@ jobs:
           XDG_RUNTIME_DIR: /tmp
           PDFCRAFT_SYSTEM_FONTS: 0
         run: |
-          export PDFCRAFT_OFFICE_TEST_INPUT="$GITHUB_WORKSPACE/validation-output/office.docx"
-          export PDFCRAFT_OFFICE_TEST_SHOT="$GITHUB_WORKSPACE/validation-output/app-office.png"
+          export PDFCRAFT_OFFICE_TEST_INPUT="$GITHUB_WORKSPACE/target/validation-output/office.docx"
+          export PDFCRAFT_OFFICE_TEST_SHOT="$GITHUB_WORKSPACE/target/validation-output/app-office.png"
           cargo test -p pdfcraft-ui-egui --lib office_open_converts_in_background_without_replacing_the_source -- --ignored
       - name: Render the real app shell with the redacted PDF
         if: runner.os == 'Linux'
         env:
           XDG_RUNTIME_DIR: /tmp
           PDFCRAFT_SYSTEM_FONTS: 0
-        run: cargo run -p pdfcraft-ui-egui --example shot -- validation-output/app-redacted.png validation-output/jpg-after.pdf --scale 1 --language en
+        run: cargo run -p pdfcraft-ui-egui --example shot -- target/validation-output/app-redacted.png target/validation-output/jpg-after.pdf --scale 1 --language en
       - name: Render PDF independently with Poppler
         if: runner.os == 'Linux'
-        run: pdftoppm -r 72 -png -singlefile validation-output/jpg-after.pdf validation-output/poppler-redacted
+        run: pdftoppm -r 72 -png -singlefile target/validation-output/jpg-after.pdf target/validation-output/poppler-redacted
       - name: Clippy
         if: ${{ !cancelled() }}
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
@@ -146,7 +146,7 @@ jobs:
         with:
           name: validation-${{ runner.os }}
           path: |
-            validation-output
+            target/validation-output
             formatting.patch
           if-no-files-found: ignore
 

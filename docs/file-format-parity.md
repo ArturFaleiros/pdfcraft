@@ -1,5 +1,7 @@
 # File format parity
 
+> **2026-10-15 update:** Optional local Office import passed ten-format Windows/Linux integration and Linux UI tests; conversion remains partial. Existing overall estimates have not been re-scored.
+
 > **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (XDP data row corrected; BigTIFF in Create PDF) · **Target:** Adobe Acrobat Pro (Acrobat DC, continuous track 26.002.21931, macOS)
 
 Every format Acrobat Pro reads or writes, and PdfCraft's support for it. Acrobat's list comes from
@@ -68,7 +70,7 @@ features total).
 | Plain text | yes | yes | good | `create.from-text` |
 | Clipboard (image or text) | yes | yes | good | `create.from-clipboard` |
 | Screenshot | yes | no | none | `create.from-screenshot` planned |
-| Word, Excel, PowerPoint (and Visio, Publisher on Windows) | yes | no | none | `create.from-office` planned (LibreOffice sidecar) |
+| Word, Excel, PowerPoint (and Visio, Publisher on Windows) | yes | partial | optional desktop LibreOffice | `create.from-office`: Word/Excel/PowerPoint and OpenDocument/RTF tested on Windows/Linux; requires installed LibreOffice, no web or confined-session import; Visio/Publisher unsupported. See [Office import](office-conversion.md). |
 | HTML file, web page URL | yes | no | none | `create.from-html`, `create.from-web-page` planned |
 | RTF | yes | no | none | |
 | PostScript / EPS (Distiller) | yes | no | none | `create.distiller` planned (P3) |

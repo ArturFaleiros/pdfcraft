@@ -6,7 +6,7 @@ from pypdf import PdfReader
 from pypdf.generic import IndirectObject
 
 cli = str(Path(sys.argv[1]).resolve())
-root = Path("validation-output").resolve()
+root = Path("target/validation-output").resolve()
 root.mkdir(exist_ok=True)
 def run(*args):
     p = subprocess.run([cli, *map(str,args)], text=True, capture_output=True, timeout=180)
