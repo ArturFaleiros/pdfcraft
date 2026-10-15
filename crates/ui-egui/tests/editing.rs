@@ -1372,7 +1372,8 @@ fn files_that_cannot_be_read_are_listed_and_left_out_once_the_user_agrees() {
         assert!(why.starts_with("Can't be read: ") && !why.contains(&f.name), "{why}");
         assert!(f.lock.is_none() && f.pages == 0);
     }
-    h.get_by_label_contains("this file type can't be converted");
+    // Word is supported now; this truncated package is refused for its damaged directory.
+    h.get_by_label_contains("the package's directory is missing");
     // One readable file is not enough to combine.
     assert!(h.get_by_label("Combine").accesskit_node().is_disabled());
     h.state_mut().use_files(pdfcraft_ui_egui::FilePurpose::Combine, vec![("two.pdf".into(), fixture(1))]);
@@ -1777,9 +1778,12 @@ fn files_dropped_beside_the_pages_panel_still_open_as_documents() {
     h.hover_at(egui::pos2(thumb.left() - 300.0, thumb.center().y));
     h.run_steps(2);
     drop_files(&mut h, vec![Dropped("other.pdf", fixture(1))]);
-    h.run_steps(3);
+    // Native opening prepares the document on a worker; three UI frames need not give it
+    // any CPU time. Wait for the result, as the other dropped-document regression does.
+    support::wait_until(&mut h, "document dropped beside the Pages panel", |app| app.views.len() == 2 && app.password_prompt.is_none());
     assert_eq!(h.state().views.len(), 2);
     assert_eq!(texts_of(h.state(), 0), ["Page 1", "Page 2"]);
+    assert_eq!(texts_of(h.state(), 1), ["Page 1"], "the dropped PDF opens as its own document");
 }
 
 fn grid_zoom(h: &Harness<'static, PdfCraftApp>) -> f32 {

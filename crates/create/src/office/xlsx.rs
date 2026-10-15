@@ -84,7 +84,8 @@ fn color(n: Node<'_, '_>, theme: &[[f64; 3]]) -> Option<[f64; 3]> {
         hex_color(rgb)?
     } else if let Some(t) = attr_f64(n, "theme") {
         *theme.get(t.clamp(0.0, 64.0) as usize)?
-    } else if let Some(i) = attr_f64(n, "indexed") {
+    } else {
+        let i = attr_f64(n, "indexed")?;
         let i = i.clamp(0.0, 100.0) as usize;
         if i == 64 {
             // System foreground.
@@ -93,8 +94,6 @@ fn color(n: Node<'_, '_>, theme: &[[f64; 3]]) -> Option<[f64; 3]> {
             let v = *INDEXED.get(i)?;
             [((v >> 16) & 0xFF) as f64 / 255.0, ((v >> 8) & 0xFF) as f64 / 255.0, (v & 0xFF) as f64 / 255.0]
         }
-    } else {
-        return None;
     };
     if let Some(t) = attr_f64(n, "tint").filter(|t| t.is_finite()) {
         let t = t.clamp(-1.0, 1.0);
