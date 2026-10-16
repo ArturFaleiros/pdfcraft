@@ -359,3 +359,54 @@ fn multiple_files_past_a_thousand_are_all_used() {
     let doc = app.session.get(app.views[0].id).unwrap();
     assert_eq!(doc.info.pages.len(), 1001, "every picked file is used, in order");
 }
+
+/// #2871: all three user-facing entry points share native DOCX conversion.
+#[test]
+fn docx_opens_inserts_and_combines_as_pdf_pages() {
+    use pdfcraft_engine::{Session, compare::OfficeFormat};
+    use pdfcraft_ui_egui::FilePurpose;
+    let mut source = Session::new();
+    let pdf = source.create_from_text("Report", "Native DOCX import").unwrap();
+    let id = source.open_new("report.pdf", pdf.clone()).unwrap();
+    let docx = source.get(id).unwrap().export_office(OfficeFormat::Docx);
+    let mut app = PdfCraftApp::new();
+    app.set_option("language", "en").unwrap();
+    app.open_bytes("Report.DOCX", Some("/tmp/Report.DOCX".into()), docx.clone()).unwrap();
+    let id = app.views[0].id;
+    let converted = app.session.get(id).unwrap();
+    assert_eq!(converted.name, "Report.pdf");
+    assert!(converted.path.is_none() && converted.dirty);
+    assert_eq!(converted.info.pages.len(), 1);
+    app.insert_pages_from("report.docx", docx.clone());
+    assert_eq!(app.session.get(id).unwrap().info.pages.len(), 2);
+    app.session.undo(id).unwrap();
+    assert_eq!(app.session.get(id).unwrap().info.pages.len(), 1);
+    app.session.redo(id).unwrap();
+    assert_eq!(app.session.get(id).unwrap().info.pages.len(), 2);
+    let before = app.session.docs().len();
+    assert!(app.open_bytes("broken.docx", None, b"PK\x03\x04".to_vec()).is_err());
+    assert_eq!(app.session.docs().len(), before);
+    app.open_combine_tab();
+    app.use_files(FilePurpose::Combine, vec![("report.docx".into(), docx), ("existing.pdf".into(), pdf.to_vec())]);
+    assert_eq!(app.combine_draft.len(), 2);
+    assert_eq!(app.combine_draft[0].pages, 1);
+    assert!(app.combine_draft[0].problem.is_none());
+    assert!(app.combine_draft[0].notes.iter().any(|n| n.contains("layout may differ")));
+    let before_combine = app.session.docs().len();
+    app.combine_staged();
+    assert_eq!(app.session.docs().len(), before_combine + 1, "Combine opens a new document");
+    assert_eq!(app.session.docs().last().unwrap().name, "Combined.pdf");
+    assert_eq!(app.session.docs().last().unwrap().info.pages.len(), 2);
+    if let Ok(path) = std::env::var("PDFCRAFT_DOCX_IMPORT_SHOT") {
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1200.0, 800.0)).build_eframe(move |_cc| app);
+        h.run_steps(8);
+        let start = std::time::Instant::now();
+        while h.state().render_pending() && start.elapsed() < std::time::Duration::from_secs(20) {
+            h.run_steps(2);
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        h.run_steps(3);
+        assert!(!h.state().render_pending(), "the screenshot must show the converted pages");
+        h.render().unwrap().save(path).unwrap();
+    }
+}

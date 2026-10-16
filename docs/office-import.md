@@ -1,6 +1,6 @@
 # Word, PowerPoint and Excel to PDF
 
-> **Status:** M10 candidate, native import of Office Open XML · **Revision history:** 2026-10-14 first version.
+> **Status:** M10 candidate, native import of Office Open XML · **Revision history:** 2026-10-14 first version; 2026-10-16 #2871 workflow completion and reporting.
 
 PdfCraft opens Word (`.docx`, `.docm`, `.dotx`), PowerPoint (`.pptx`, `.pptm`, `.ppsx`, `.potx`) and
 Excel (`.xlsx`, `.xlsm`, `.xltx`) files as new, unsaved PDFs. The conversion is native Rust in
@@ -17,6 +17,16 @@ it works in the browser build too. The source file is only read.
 - **Automation:** `doc_create` with `{"from": "office", "path": "report.docx"}` returns the new
   document like `doc_open`, plus an `office` object (`kind`, `pages`, `escaped`, `notes`).
   `--root` confines the path as for every other tool.
+- **Direct automation open:** `doc_open` converts Office inputs into unsaved PDFs with no source
+  save path. It returns the same `office` report as `doc_create`.
+- **Organize Pages insertion:** `page_insert_file` accepts converted Office/image/text inputs as
+  the UI does, keeps 1-based source page selection, and remains undoable. Office conversion returns
+  an `office` report; a failed conversion leaves the destination unchanged.
+- **Conversion notices (#2871 follow-up):** Open (native and in-memory) and Insert show a notice
+  that standard-font substitution may change layout, even when there are no specific notes.
+  Combine retains the notice in each row's warnings. `doc_combine` returns a `conversions` array
+  with per-source paths, approximation counts and notices. Deep content skipped at the nesting
+  limit is counted. Source files are never written by these operations.
 
 ```json
 [
@@ -54,7 +64,7 @@ it works in the browser build too. The source file is only read.
 
 ## What is approximated
 
-Every approximation is counted in the report (`notes`), and nothing in the source is changed.
+Content-specific approximations are counted in the report (`notes`); the notice also discloses standard-font substitution. Nothing in the source is changed.
 
 - **Fonts:** text is set in the standard PDF faces (Helvetica, Times, Courier and their bold and
   italic styles), chosen from each run's font family: Calibri, Arial, Aptos → Helvetica;

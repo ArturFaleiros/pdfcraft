@@ -465,3 +465,10 @@ fn office_files_are_recognised_by_name_and_signature() {
     let (doc, r) = from_office("vazio.docx", &d).unwrap();
     assert_eq!((r.pages, pages(&reopen(&doc)).len()), (1, 1));
 }
+
+#[test]
+fn deeply_nested_word_content_is_reported_when_left_out() {
+    let deep = format!("{}{}{}", "<w:sdt><w:sdtContent>".repeat(200), p("deep text"), "</w:sdtContent></w:sdt>".repeat(200));
+    let (_, report) = from_office("deep.docx", &docx(&deep, &[], &[])).unwrap();
+    assert!(report.notes.iter().any(|note| note.contains("nesting limit")), "{report:?}");
+}

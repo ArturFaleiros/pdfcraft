@@ -788,6 +788,7 @@ impl Cx<'_, '_> {
         depth: usize,
     ) {
         if depth > MAX_DEPTH {
+            self.notes.add("content beyond the nesting limit, left out");
             return;
         }
         for c in n.children().filter(Node::is_element) {
@@ -1037,6 +1038,7 @@ impl Cx<'_, '_> {
     /// Read block content (a body, a cell, a header, a text box).
     fn blocks(&mut self, n: Node<'_, '_>, rels: &Rels, depth: usize, out: &mut Vec<Block>) {
         if depth > MAX_DEPTH {
+            self.notes.add("content beyond the nesting limit, left out");
             return;
         }
         for c in n.children().filter(Node::is_element) {
