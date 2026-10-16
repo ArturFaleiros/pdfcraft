@@ -6531,3 +6531,51 @@ fn a_root_less_write_output_is_atomic_too() {
     assert!(matches!(&e, ToolError::Failed(m) if m.contains("is a folder")), "{e:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn docx_open_insert_combine_and_root_confinement() {
+    let dir = workdir("docx-import");
+    let mut a = auto(&dir);
+    let base = ok(&mut a, "doc_open", json!({ "path": "a.pdf" }))["doc"].as_u64().unwrap();
+    ok(&mut a, "doc_export_office", json!({ "doc": base, "path": "report.docx" }));
+    let original = std::fs::read(dir.join("report.docx")).unwrap();
+    let opened = ok(&mut a, "doc_open", json!({ "path": "report.docx" }));
+    assert_eq!(opened["pages"], 3);
+    assert_eq!(opened["name"], "report.pdf");
+    assert_eq!(opened["dirty"], true);
+    assert_eq!(opened["office"]["kind"], "Word");
+    let converted = opened["doc"].as_u64().unwrap();
+    assert!(a.call("doc_save", &json!({ "doc": converted })).is_err(), "Save requires a PDF destination");
+    ok(&mut a, "doc_save", json!({ "doc": converted, "path": "converted.pdf" }));
+    let inserted = ok(&mut a, "page_insert_file", json!({ "doc": base, "path": "report.docx", "pages": [2], "at": 1 }));
+    assert!(inserted["office"]["notice"].as_str().unwrap().contains("layout may differ"));
+    assert_eq!(page_text(&mut a, base).len(), 4);
+    ok(&mut a, "edit_undo", json!({ "doc": base }));
+    assert_eq!(page_text(&mut a, base).len(), 3);
+    let combined = ok(&mut a, "doc_combine", json!({ "paths": ["b.pdf", "report.docx"], "out": "combined.pdf", "open": true }));
+    let cid = combined["document"]["doc"].as_u64().unwrap();
+    let text = page_text(&mut a, cid);
+    assert_eq!(text.len(), 5);
+    assert!(text[2].contains("Page 1") && text[4].contains("Page 3"));
+    let created = ok(&mut a, "doc_create", json!({ "from": "office", "path": "report.docx", "name": "Custom.pdf" }));
+    assert_eq!(created["name"], "Custom.pdf");
+    let outside = dir.with_extension("docx");
+    std::fs::write(&outside, &original).unwrap();
+    let escape = format!("../{}", outside.file_name().unwrap().to_string_lossy());
+    for (tool, args) in [
+        ("doc_open", json!({ "path": escape })),
+        ("page_insert_file", json!({ "doc": base, "path": escape, "at": 1 })),
+        ("doc_create", json!({ "from": "office", "path": escape })),
+    ] {
+        let error = a.call(tool, &args).unwrap_err().to_string();
+        assert!(error.contains("outside"), "{tool}: {error}");
+    }
+    let error = a.call("doc_combine", &json!({ "paths": ["b.pdf", escape] })).unwrap_err().to_string();
+    assert!(error.contains("outside"), "{error}");
+    std::fs::remove_file(outside).unwrap();
+    std::fs::write(dir.join("broken.docx"), b"PK\x03\x04").unwrap();
+    let before = page_text(&mut a, base);
+    assert!(a.call("page_insert_file", &json!({ "doc": base, "path": "broken.docx", "at": 1 })).is_err());
+    assert_eq!(page_text(&mut a, base), before);
+    assert_eq!(std::fs::read(dir.join("report.docx")).unwrap(), original);
+}

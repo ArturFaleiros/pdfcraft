@@ -95,7 +95,15 @@ impl PdfCraftApp {
     /// `bytes` is not something Create understands (the caller then tries to open it as a PDF).
     pub(crate) fn open_converted(&mut self, name: &str, bytes: &[u8]) -> Option<Result<(), String>> {
         use pdfcraft_engine::SourceKind;
-        if !matches!(pdfcraft_engine::source_kind(name, bytes), Some(SourceKind::Image | SourceKind::Text | SourceKind::Office)) {
+        if pdfcraft_engine::source_kind(name, bytes) == Some(SourceKind::Office) {
+            return Some((|| {
+                let (pdf, report) = self.session.create_from_office(name, bytes).map_err(|e| e.to_string())?;
+                self.open_created_bytes(&format!("{}.pdf", stem(name)), Ok(pdf))?;
+                self.notify_error(report.notice());
+                Ok(())
+            })());
+        }
+        if !matches!(pdfcraft_engine::source_kind(name, bytes), Some(SourceKind::Image | SourceKind::Text)) {
             return None;
         }
         let created = self.session.convert_to_pdf(name, &Arc::new(bytes.to_vec())).map(|(_, pdf)| pdf);

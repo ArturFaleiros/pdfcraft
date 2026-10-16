@@ -273,3 +273,15 @@ pub fn from_office(name: &str, bytes: &[u8]) -> Result<(Document, OfficeReport),
     crate::set_title(&mut doc, name.rsplit_once('.').map_or(name, |(s, _)| s));
     Ok((doc, notes.report(kind, pages)))
 }
+
+impl OfficeReport {
+    /// Font substitutions can change pagination even when no content-specific note is needed.
+    pub fn notice(&self) -> String {
+        let mut notice = "Office import uses standard PDF fonts; layout may differ. Review the converted pages.".to_owned();
+        if !self.notes.is_empty() {
+            notice.push(' ');
+            notice.push_str(&self.notes.join("; "));
+        }
+        notice
+    }
+}

@@ -1222,12 +1222,7 @@ impl PdfCraftApp {
                 let stem = pending.name.rsplit_once('.').map_or(pending.name.as_str(), |(stem, _)| stem);
                 match self.open_created_bytes(&format!("{stem}.pdf"), Ok(pdf)) {
                     Ok(()) => {
-                        if !report.notes.is_empty() {
-                            self.notify_fmt(
-                                "Converted {name}. Approximated: {notes}",
-                                &[("name", &pending.name), ("notes", &report.notes.join("; "))],
-                            );
-                        }
+                        self.notify_error(report.notice());
                         if let Some(command) = pending.then {
                             self.execute(command);
                         }

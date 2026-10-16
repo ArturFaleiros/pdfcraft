@@ -198,8 +198,16 @@ folders. The CLI also exposes it as `pdfcraft-cli batch`. See the
 
 `doc_create` with `from: "office"` and a `path` converts a Word, PowerPoint or Excel file natively
 (no external program) into a new, unsaved document, and adds an `office` object to the result:
-`kind`, `pages`, `escaped` (characters written as `[U+XXXX]`) and `notes` (what was approximated).
-`doc_create_multiple`, `doc_combine` and `doc_batch` convert Office files like images and text. See
+`kind`, `pages`, `escaped` (characters written as `[U+XXXX]`), `notes` (what was approximated)
+and `notice` (including the font/layout caveat).
+
+The #2871 follow-up to the unmerged native-import proposal #2326 also makes `doc_open` convert
+Office inputs into unsaved PDFs. `page_insert_file` converts before inserting selected source
+pages and stays undoable; both return the same `office` report. `doc_combine` returns per-source
+`conversions`. Source DOCX files are read only, Save requires a PDF destination, and `--root`
+and existing PDF password behavior are preserved.
+
+`doc_create_multiple` and `doc_batch` also convert Office files like images and text. See
 [Word, PowerPoint and Excel to PDF](../../docs/office-import.md).
 
 ## Viewer navigation history
