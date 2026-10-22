@@ -472,3 +472,75 @@ fn deeply_nested_word_content_is_reported_when_left_out() {
     let (_, report) = from_office("deep.docx", &docx(&deep, &[], &[])).unwrap();
     assert!(report.notes.iter().any(|note| note.contains("nesting limit")), "{report:?}");
 }
+
+/// The text a page shows, decoded through each font's own encoding and `/ToUnicode` (whitespace
+/// left out: words may be shown one by one).
+fn shown_text(doc: &Document, page: &Dict) -> String {
+    let fonts = page.get(b"Resources").unwrap().as_dict().unwrap().get(b"Font").unwrap().as_dict().unwrap().clone();
+    let Object::Stream(s) = &*doc.resolve(page.get(b"Contents").unwrap()) else { panic!("no content") };
+    let ops = s.decoded().unwrap();
+    let (mut out, mut font, mut i) = (String::new(), None, 0);
+    while let Some(&b) = ops.get(i) {
+        match b {
+            b'/' => {
+                let end = ops[i + 1..].iter().position(|c| !c.is_ascii_alphanumeric()).map_or(ops.len(), |e| i + 1 + e);
+                let name = ops[i + 1..end].to_vec();
+                if let Some(f) = fonts.get(&name) {
+                    font = Some(pdfcraft_fonts::pdf::Metrics::from_dict(doc, doc.resolve(f).as_dict().unwrap()));
+                }
+                i = end;
+            }
+            b'(' => {
+                let mut bytes = Vec::new();
+                i += 1;
+                while let Some(&c) = ops.get(i) {
+                    i += 1;
+                    match c {
+                        b')' => break,
+                        b'\\' => {
+                            bytes.push(ops[i]);
+                            i += 1;
+                        }
+                        c => bytes.push(c),
+                    }
+                }
+                out.push_str(&font.as_ref().expect("a font is set before text").decode(&bytes));
+            }
+            _ => i += 1,
+        }
+    }
+    out.split_whitespace().collect()
+}
+
+/// Turkish letters (and the other Latin letters the standard faces carry beyond WinAnsi) are drawn,
+/// searchable, in the run's own face; only scripts those faces lack are written as [U+XXXX].
+#[test]
+fn turkish_and_central_european_letters_are_drawn_not_escaped() {
+    let turkish = "Ağaç İşçi ılık Şükrü Ğöl";
+    let others = "Łódź Čeština Ősz Șțară";
+    let body = format!(
+        r#"<w:p><w:r><w:t>{turkish}</w:t></w:r></w:p><w:p><w:r><w:rPr><w:b/></w:rPr><w:t>{others}</w:t></w:r><w:r><w:t xml:space="preserve"> Ωμέγα</w:t></w:r></w:p>"#
+    );
+    let (doc, report) = from_office("Türkçe.docx", &docx(&body, &[], &[])).unwrap();
+    assert_eq!(report.escaped, 5, "only the Greek word is escaped: {report:?}");
+    let doc = reopen(&doc);
+    let page = &pages(&doc)[0];
+    let text = shown_text(&doc, page);
+    let expected: String = format!("{turkish} {others} [U+03A9][U+03BC][U+03AD][U+03B3][U+03B1]").split_whitespace().collect();
+    assert_eq!(text, expected);
+    // The extra letters come from Helvetica and Helvetica-Bold re-encoded, not from another font.
+    let fonts = page.get(b"Resources").unwrap().as_dict().unwrap().get(b"Font").unwrap().as_dict().unwrap().clone();
+    let latin: Vec<Dict> = fonts.iter().filter(|(k, _)| k.starts_with(b"L")).map(|(_, r)| doc.resolve(r).as_dict().unwrap().clone()).collect();
+    let mut bases: Vec<&[u8]> = latin.iter().map(|f| f.name(b"BaseFont").unwrap()).collect();
+    bases.sort();
+    assert_eq!(bases, [&b"Helvetica"[..], b"Helvetica-Bold"]);
+    for f in &latin {
+        let enc = doc.resolve(f.get(b"Encoding").unwrap()).as_dict().unwrap().clone();
+        let diffs = enc.get(b"Differences").unwrap().as_array().unwrap().clone();
+        assert!(diffs.iter().any(|d| d.as_name() == Some(b"gbreve")) && diffs.iter().any(|d| d.as_name() == Some(b"dotlessi")));
+        // ğ is as wide as g in the same face.
+        let face = Std14::from_base_font(std::str::from_utf8(f.name(b"BaseFont").unwrap()).unwrap()).unwrap();
+        let m = pdfcraft_fonts::pdf::Metrics::from_dict(&doc, f);
+        assert_eq!(m.width(u32::from(latin::code('ğ').unwrap())) * 1000.0, face.width(b'g'));
+    }
+}

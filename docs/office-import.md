@@ -1,6 +1,6 @@
 # Word, PowerPoint and Excel to PDF
 
-> **Status:** M10 candidate, native import of Office Open XML · **Revision history:** 2026-10-14 first version; 2026-10-16 #2871 workflow completion and reporting.
+> **Status:** M10 candidate, native import of Office Open XML · **Revision history:** 2026-10-14 first version; 2026-10-16 #2871 workflow completion and reporting; 2026-10-22 Turkish and Central European letters drawn, UI notices translated and shown only when something was approximated.
 
 PdfCraft opens Word (`.docx`, `.docm`, `.dotx`), PowerPoint (`.pptx`, `.pptm`, `.ppsx`, `.potx`) and
 Excel (`.xlsx`, `.xlsm`, `.xltx`) files as new, unsaved PDFs. The conversion is native Rust in
@@ -22,10 +22,11 @@ it works in the browser build too. The source file is only read.
 - **Organize Pages insertion:** `page_insert_file` accepts converted Office/image/text inputs as
   the UI does, keeps 1-based source page selection, and remains undoable. Office conversion returns
   an `office` report; a failed conversion leaves the destination unchanged.
-- **Conversion notices (#2871 follow-up):** Open (native and in-memory) and Insert show a notice
-  that standard-font substitution may change layout, even when there are no specific notes.
-  Combine retains the notice in each row's warnings. `doc_combine` returns a `conversions` array
-  with per-source paths, approximation counts and notices. Deep content skipped at the nesting
+- **Conversion notices (#2871 follow-up):** Open (native and in-memory) and Insert say, in the
+  interface language, what was approximated; an exact conversion opens without a notice. Combine
+  puts the same sentence in the row's warnings. Automation results carry an English `notice` that
+  also states the standard-font caveat, and `doc_combine` returns a `conversions` array with
+  per-source paths, approximation counts and notices. Deep content skipped at the nesting
   limit is counted. Source files are never written by these operations.
 
 ```json
@@ -64,14 +65,20 @@ it works in the browser build too. The source file is only read.
 
 ## What is approximated
 
-Content-specific approximations are counted in the report (`notes`); the notice also discloses standard-font substitution. Nothing in the source is changed.
+Content-specific approximations are counted in the report (`notes`); automation's `notice` also
+states the standard-font substitution. Nothing in the source is changed.
 
 - **Fonts:** text is set in the standard PDF faces (Helvetica, Times, Courier and their bold and
   italic styles), chosen from each run's font family: Calibri, Arial, Aptos → Helvetica;
   Cambria, Georgia, Times New Roman → Times; Consolas, Courier New → Courier. No font program is
   embedded, so the PDF stays small and searchable, but line breaks can differ from Office's.
-  Characters those faces can't draw (beyond Western European: CJK, Arabic, emoji…) are written as
-  `[U+XXXX]` and counted; they are never replaced by `?`.
+  Beyond WinAnsi, the Turkish, Central European, Baltic and Romanian letters (ğ ı İ ş, ą ć ę ł ń
+  ś ź ż, č ř ů, ő ű, ā ē ī ū, ș ț…) are drawn from the same faces through a second encoding with a
+  `/ToUnicode` map, so they look like the surrounding text and stay searchable. `ď ľ Ľ ť ģ Đ đ`
+  are not among them: viewers that stand in for the standard faces (PdfCraft's renderer included)
+  build accented letters from a base letter and a plain accent and can't build these. They, and
+  everything the faces can't draw at all (Greek, Cyrillic, CJK, Arabic, emoji…), are written as
+  `[U+XXXX]` and counted; they are never replaced by `?`. Embedding real faces would cover them.
 - **Not drawn, shown as outlined boxes:** charts, SmartArt, embedded objects, and pictures in a
   format PdfCraft can't decode (EMF, WMF, SVG) or linked rather than embedded.
 - **Simplified:** gradients use their middle colour; arcs in custom shapes are drawn straight;

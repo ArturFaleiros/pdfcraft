@@ -1,11 +1,12 @@
-//! Page content for imported Office documents: text in the standard-14 faces, filled and
+//! Page content for imported Office documents: text in the standard-14 faces (WinAnsi, plus the
+//! Latin letters of [`super::latin`] through a second encoding of each face), filled and
 //! stroked paths, and image XObjects. Pages are kept until [`Canvas::finish`] so a converter can
 //! go back to a page (headers and footers are drawn once the page count is known).
 
-use pdfcraft_cos::{Dict, Document, ObjRef, Object};
-use pdfcraft_fonts::{Std14, literal, win_ansi};
+use pdfcraft_cos::{Dict, Document, ObjRef, Object, Stream};
+use pdfcraft_fonts::{Std14, literal, win_ansi_byte};
 
-use super::RunStyle;
+use super::{RunStyle, latin};
 use crate::CreateError;
 
 /// Most pages one conversion may produce.
@@ -46,7 +47,10 @@ pub(crate) struct Page {
     pub w: f64,
     pub h: f64,
     ops: Vec<u8>,
+    /// The faces used, by [`FACES`] index: in WinAnsi (`/F{i}`) and in the extra Latin encoding
+    /// (`/L{i}`).
     fonts: u16,
+    latin_fonts: u16,
     images: Vec<ObjRef>,
 }
 
@@ -72,11 +76,29 @@ impl Page {
             self.fill_rect(x, y - size * 0.22, w, size * 1.12, h);
         }
         let face = face_index(style.face());
-        self.fonts |= 1 << face;
-        let bytes = literal(&win_ansi(s));
-        self.push(&format!("BT /F{face} {} Tf {} rg 1 0 0 1 {} {} Tm ", n(size), rgb(style.color), n(x), n(y)));
-        self.ops.extend_from_slice(&bytes);
-        self.push(" Tj ET\n");
+        self.push(&format!("BT {} rg 1 0 0 1 {} {} Tm ", rgb(style.color), n(x), n(y)));
+        // Runs of WinAnsi text and runs of extra Latin letters, each shown in its own font.
+        let mut run: Option<(bool, Vec<u8>)> = None;
+        for c in s.chars() {
+            let (extra, byte) = match (win_ansi_byte(if c == '\t' { ' ' } else { c }), latin::code(c)) {
+                (Some(b), _) => (false, b),
+                (None, Some(b)) => (true, b),
+                (None, None) => (false, b'?'),
+            };
+            match &mut run {
+                Some((e, bytes)) if *e == extra => bytes.push(byte),
+                _ => {
+                    if let Some((e, bytes)) = run.take() {
+                        self.show(face, e, size, &bytes);
+                    }
+                    run = Some((extra, vec![byte]));
+                }
+            }
+        }
+        if let Some((e, bytes)) = run {
+            self.show(face, e, size, &bytes);
+        }
+        self.push("ET\n");
         let t = (size * 0.06).max(0.4);
         if style.underline {
             self.fill_rect(x, y - size * 0.12, w, t, style.color);
@@ -84,6 +106,20 @@ impl Page {
         if style.strike {
             self.fill_rect(x, y + size * 0.28, w, t, style.color);
         }
+    }
+
+    /// One `Tj` of `bytes` in face `face`, WinAnsi or (`extra`) the extra Latin encoding.
+    fn show(&mut self, face: usize, extra: bool, size: f64, bytes: &[u8]) {
+        let prefix = if extra {
+            self.latin_fonts |= 1 << face;
+            'L'
+        } else {
+            self.fonts |= 1 << face;
+            'F'
+        };
+        self.push(&format!("/{prefix}{face} {} Tf ", n(size)));
+        self.ops.extend_from_slice(&literal(bytes));
+        self.push(" Tj ");
     }
 
     pub(crate) fn fill_rect(&mut self, x: f64, y: f64, w: f64, h: f64, c: [f64; 3]) {
@@ -153,7 +189,7 @@ impl Canvas {
             return Err(format!("the document needs more than {MAX_PAGES} pages"));
         }
         let clamp = |v: f64| if v.is_finite() { v.clamp(72.0, 14_400.0) } else { 612.0 };
-        self.pages.push(Page { w: clamp(w), h: clamp(h), ops: Vec::new(), fonts: 0, images: Vec::new() });
+        self.pages.push(Page { w: clamp(w), h: clamp(h), ops: Vec::new(), fonts: 0, latin_fonts: 0, images: Vec::new() });
         Ok(self.pages.len() - 1)
     }
 
@@ -164,9 +200,12 @@ impl Canvas {
     /// Write every page into `doc`. A document always gets at least one page.
     pub(crate) fn finish(mut self, doc: &mut Document) -> Result<usize, CreateError> {
         if self.pages.is_empty() {
-            self.pages.push(Page { w: 612.0, h: 792.0, ops: Vec::new(), fonts: 0, images: Vec::new() });
+            self.pages.push(Page { w: 612.0, h: 792.0, ops: Vec::new(), fonts: 0, latin_fonts: 0, images: Vec::new() });
         }
         let mut fonts: [Option<ObjRef>; 12] = [None; 12];
+        let mut latin_fonts: [Option<ObjRef>; 12] = [None; 12];
+        // One encoding and one ToUnicode map serve every face.
+        let mut latin_shared: Option<(ObjRef, ObjRef)> = None;
         let count = self.pages.len();
         for page in self.pages {
             let mut font_dict = Dict::new();
@@ -191,6 +230,23 @@ impl Canvas {
                 };
                 font_dict.set(format!("F{i}").into_bytes(), Object::Ref(r));
             }
+            for (i, face) in FACES.iter().enumerate() {
+                if page.latin_fonts & (1 << i) == 0 {
+                    continue;
+                }
+                let r = match latin_fonts.get(i).copied().flatten() {
+                    Some(r) => r,
+                    None => {
+                        let (encoding, to_unicode) = *latin_shared.get_or_insert_with(|| latin_resources(doc));
+                        let r = doc.add(latin_font(*face, encoding, to_unicode));
+                        if let Some(slot) = latin_fonts.get_mut(i) {
+                            *slot = Some(r);
+                        }
+                        r
+                    }
+                };
+                font_dict.set(format!("L{i}").into_bytes(), Object::Ref(r));
+            }
             let mut res = Dict::new();
             if !font_dict.is_empty() {
                 res.set(b"Font".to_vec(), Object::Dict(font_dict));
@@ -206,6 +262,51 @@ impl Canvas {
         }
         Ok(count)
     }
+}
+
+/// The extra Latin encoding (`/Differences` naming [`latin::LETTERS`] from
+/// [`latin::FIRST_CODE`]) and the `/ToUnicode` map that reads its codes back as text.
+fn latin_resources(doc: &mut Document) -> (ObjRef, ObjRef) {
+    let mut differences = vec![Object::Int(i64::from(latin::FIRST_CODE))];
+    let mut cmap = String::from(
+        "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n/CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n1 begincodespacerange\n<00> <FF>\nendcodespacerange\n",
+    );
+    // A CMap block holds at most 100 entries.
+    for block in latin::LETTERS.chunks(100) {
+        cmap.push_str(&format!("{} beginbfchar\n", block.len()));
+        for (c, name, _) in block {
+            differences.push(Object::name(name));
+            if let Some(code) = latin::code(*c) {
+                cmap.push_str(&format!("<{code:02X}> <{:04X}>\n", u32::from(*c)));
+            }
+        }
+        cmap.push_str("endbfchar\n");
+    }
+    cmap.push_str("endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n");
+    let mut encoding = Dict::new();
+    encoding.set(b"Type".to_vec(), Object::name("Encoding"));
+    encoding.set(b"Differences".to_vec(), Object::Array(differences));
+    let encoding = doc.add(encoding);
+    let to_unicode = doc.add(Object::Stream(Stream::flate(Dict::new(), cmap.as_bytes())));
+    (encoding, to_unicode)
+}
+
+/// `face` re-encoded for the extra Latin letters, with widths matching how the importer measured
+/// them ([`latin::measured_as`]).
+fn latin_font(face: Std14, encoding: ObjRef, to_unicode: ObjRef) -> Dict {
+    let widths: Vec<Object> =
+        latin::LETTERS.iter().map(|(_, _, base)| Object::Int(win_ansi_byte(*base).map_or(0, |b| face.width(b) as i64))).collect();
+    let last = i64::from(latin::FIRST_CODE) + widths.len() as i64 - 1;
+    let mut f = Dict::new();
+    f.set(b"Type".to_vec(), Object::name("Font"));
+    f.set(b"Subtype".to_vec(), Object::name("Type1"));
+    f.set(b"BaseFont".to_vec(), Object::name(face.base_font()));
+    f.set(b"Encoding".to_vec(), Object::Ref(encoding));
+    f.set(b"FirstChar".to_vec(), Object::Int(i64::from(latin::FIRST_CODE)));
+    f.set(b"LastChar".to_vec(), Object::Int(last));
+    f.set(b"Widths".to_vec(), Object::Array(widths));
+    f.set(b"ToUnicode".to_vec(), Object::Ref(to_unicode));
+    f
 }
 
 #[cfg(test)]

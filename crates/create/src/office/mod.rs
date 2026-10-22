@@ -4,13 +4,16 @@
 //!
 //! Text is set in the standard-14 faces (Helvetica, Times, Courier and their bold and italic
 //! styles) chosen from each run's font family, so the result needs no embedded font program and
-//! stays searchable. Characters those faces can't draw are written as `[U+XXXX]` and counted in
-//! the [`OfficeReport`], never set as `?`. Content the importer can't draw (charts, SmartArt,
-//! vector images) is replaced by an outlined box of the same size and counted too.
+//! stays searchable. Latin letters beyond WinAnsi (Turkish, Central European, Baltic, Romanian)
+//! are drawn from the same faces through a second encoding ([`latin`]). Characters those faces
+//! can't draw at all are written as `[U+XXXX]` and counted in the [`OfficeReport`], never set as
+//! `?`. Content the importer can't draw (charts, SmartArt, vector images) is replaced by an
+//! outlined box of the same size and counted too.
 
 mod canvas;
 mod docx;
 mod flow;
+mod latin;
 mod pptx;
 mod xlsx;
 mod xml;
@@ -107,7 +110,7 @@ impl Notes {
                 '\u{2713}' | '\u{2714}' => 'x',
                 c => c,
             };
-            if pdfcraft_fonts::win_ansi_byte(c).is_some() || c == ' ' {
+            if pdfcraft_fonts::win_ansi_byte(c).is_some() || c == ' ' || latin::code(c).is_some() {
                 out.push(c);
             } else if c.is_control() {
                 // Other control characters carry no ink.
@@ -222,7 +225,12 @@ impl RunStyle {
 
     /// Width of already-drawable text in points.
     pub(crate) fn width(&self, s: &str) -> f64 {
-        self.face().text_width(s, self.draw_size())
+        let face = self.face();
+        let size = self.draw_size();
+        if s.chars().all(|c| latin::code(c).is_none()) {
+            return face.text_width(s, size);
+        }
+        face.text_width(&s.chars().map(latin::measured_as).collect::<String>(), size)
     }
 }
 

@@ -25,8 +25,9 @@ Layer L4. Create a PDF (Acrobat's Create a PDF tool), execution plan M10.2:
   natively from its Office Open XML package (`office/`): Word flows onto its sections' pages with
   styles, lists, tables, images, headers and footers; PowerPoint gives one page per visible slide
   with master and layout inheritance; Excel prints each visible sheet's used range with its number
-  formats. Text is set in the standard-14 faces chosen from each run's font family; characters
-  they can't draw are written as `[U+XXXX]`. Returns the document and an `OfficeReport` counting
+  formats. Text is set in the standard-14 faces chosen from each run's font family, with Turkish,
+  Central European, Baltic and Romanian letters drawn through a second encoding of the same face
+  (`office/latin.rs`); characters they can't draw are written as `[U+XXXX]`. Returns the document and an `OfficeReport` counting
   what was approximated (charts and vector images become outlined boxes). See
   [Word, PowerPoint and Excel to PDF](../../docs/office-import.md).
 
