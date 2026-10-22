@@ -13,7 +13,8 @@ it works in the browser build too. The source file is only read.
   worker converts in the background and the result opens in a new tab; Save As chooses where it
   goes. If something was approximated, a notice says what.
 - **Create PDF from multiple files**, **Combine** and **batch convert** accept Office files the
-  same way they accept images and text (`Session::convert_to_pdf`).
+  same way they accept images and text (`Session::convert_to_pdf`). Create PDF from multiple
+  files and Combine say what each conversion approximated (`Session::convert_to_pdf_reported`).
 - **Automation:** `doc_create` with `{"from": "office", "path": "report.docx"}` returns the new
   document like `doc_open`, plus an `office` object (`kind`, `pages`, `escaped`, `notes`).
   `--root` confines the path as for every other tool.

@@ -7,7 +7,7 @@
 
 use ::image::ImageDecoder;
 use pdfcraft_content::{Matrix, overlaps};
-use pdfcraft_cos::{Document, Object, Stream};
+use pdfcraft_cos::{Dict, Document, Object, Stream};
 
 /// Most pixels an image may have to be cleared in place (larger ones are removed).
 const MAX_PIXELS: u64 = 64 << 20;
@@ -37,6 +37,24 @@ fn components(doc: &Document, s: &Stream) -> Option<usize> {
 
 /// `Ok(Some(copy))` with the covered pixels cleared, `Ok(None)` when no pixel intersects,
 /// `Err(())` when the image can't be cleared (the caller removes it).
+/// The image dictionary entries a cleared copy keeps (ISO 32000-2 §8.9.5): its samples' layout
+/// and how to paint them, its optional-content membership and its place in the structure tree.
+const KEPT_KEYS: [&[u8]; 13] = [
+    b"Type",
+    b"Subtype",
+    b"Width",
+    b"Height",
+    b"ColorSpace",
+    b"BitsPerComponent",
+    b"ImageMask",
+    b"Decode",
+    b"Interpolate",
+    b"Intent",
+    b"OC",
+    b"StructParent",
+    b"Name",
+];
+
 #[allow(clippy::result_unit_err)]
 pub(crate) fn clear(doc: &Document, s: &Stream, ctm: &Matrix, rects: &[[f64; 4]]) -> Result<Option<Stream>, ()> {
     decode_and_clear(doc, s, ctm, rects).ok_or(())
@@ -134,10 +152,15 @@ fn decode_and_clear(doc: &Document, s: &Stream, ctm: &Matrix, rects: &[[f64; 4]]
     if cleared == 0 {
         return Some(None);
     }
-    let mut dict = s.dict.clone();
-    dict.remove(b"Length");
-    dict.remove(b"DecodeParms");
-    dict.remove(b"Alternates");
+    // Only what drawing the cleared samples needs is carried over: /Metadata (an XMP thumbnail),
+    // /OPI (a link to the high-resolution original), /Alternates and the like can still show the
+    // picture that was redacted.
+    let mut dict = Dict::new();
+    for key in KEPT_KEYS {
+        if let Some(value) = s.dict.get(key) {
+            dict.set(key.to_vec(), value.clone());
+        }
+    }
     Some(Some(Stream::flate(dict, &data)))
 }
 

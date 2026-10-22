@@ -3056,6 +3056,10 @@ pub struct OpenContext {
 }
 
 /// A Word, PowerPoint or Excel file as new PDF bytes, and what could not be carried over.
+/// A file made into PDF bytes by [`Session::convert_to_pdf_reported`]: what it was, the PDF, and
+/// the report of a Word, PowerPoint or Excel conversion.
+pub type Converted = (SourceKind, Arc<Vec<u8>>, Option<OfficeReport>);
+
 fn office_pdf(now: Option<i64>, name: &str, bytes: &[u8]) -> Result<(Arc<Vec<u8>>, OfficeReport), EditError> {
     // The importer reads untrusted packages: a panic in it must not take the app down.
     let (doc, report) =
@@ -4472,6 +4476,12 @@ impl Session {
     /// document) to PDF bytes; a PDF is checked (it must open and allow copying pages) and
     /// returned as it is.
     pub fn convert_to_pdf(&self, name: &str, bytes: &Arc<Vec<u8>>) -> Result<(SourceKind, Arc<Vec<u8>>), EditError> {
+        self.convert_to_pdf_reported(name, bytes).map(|(kind, pdf, _)| (kind, pdf))
+    }
+
+    /// [`Self::convert_to_pdf`], with the report of a Word, PowerPoint or Excel conversion (what
+    /// was approximated), for the caller to show.
+    pub fn convert_to_pdf_reported(&self, name: &str, bytes: &Arc<Vec<u8>>) -> Result<Converted, EditError> {
         let Some(kind) = source_kind(name, bytes) else {
             return Err(EditError::Source(format!(
                 "{name}: this file type can't be converted; use a PDF, an image, a .txt file or a Word, PowerPoint or Excel file (.docx, .pptx, .xlsx)"
@@ -4480,13 +4490,14 @@ impl Session {
         let title = name.rsplit_once('.').map_or(name, |(s, _)| s);
         // Image decoders read untrusted bytes: a panic in one must not take the app down.
         let created = guard(|| match kind {
-            SourceKind::Pdf => open_source(name, bytes).map(|_| bytes.clone()),
-            SourceKind::Image => self.create_from_images(&[(name.to_string(), bytes.to_vec())]),
-            SourceKind::Text => self.create_from_text(title, &decode_text(bytes)),
-            SourceKind::Office => self.create_from_office(name, bytes).map(|(pdf, _)| pdf),
+            SourceKind::Pdf => open_source(name, bytes).map(|_| (bytes.clone(), None)),
+            SourceKind::Image => self.create_from_images(&[(name.to_string(), bytes.to_vec())]).map(|pdf| (pdf, None)),
+            SourceKind::Text => self.create_from_text(title, &decode_text(bytes)).map(|pdf| (pdf, None)),
+            SourceKind::Office => self.create_from_office(name, bytes).map(|(pdf, report)| (pdf, Some(report))),
         })
         .map_err(|_| EditError::Source(format!("{name}: the file could not be read")))?;
-        Ok((kind, created?))
+        let (pdf, report) = created?;
+        Ok((kind, pdf, report))
     }
 
     /// A file for Combine as PDF bytes: an image or text file is converted; a PDF is returned as

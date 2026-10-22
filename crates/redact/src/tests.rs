@@ -325,6 +325,31 @@ fn jpeg_redaction_preserves_uncovered_samples_and_retires_original_after_save() 
     }
 }
 
+/// A cleared copy is a new picture: the original's XMP metadata (which can hold a thumbnail) and
+/// its OPI link to the high-resolution original must not follow it into the saved file.
+#[test]
+fn cleared_images_drop_metadata_and_links_that_show_the_original() {
+    let raw = vec![200u8; 8 * 4 * 3];
+    for (filter, samples) in [("/DCTDecode", jpeg_fixture(false)), ("", raw)] {
+        let img = stream(
+            &format!(
+                "/Type /XObject /Subtype /Image /Width 8 /Height 4 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter {filter} /Metadata 8 0 R /OPI << /2.0 << /Type /OPI /Version 2.0 /F (SECRET-OPI-ORIGINAL.tif) >> >> /ID (SECRET-ID)"
+            )
+            .replace("/Filter  ", ""),
+            &samples,
+        );
+        let xmp = stream("/Type /Metadata /Subtype /XML", b"<x:xmpmeta>SECRET-XMP-THUMBNAIL</x:xmpmeta>");
+        let mut doc = one_page(b"q 80 0 0 40 100 100 cm /Im1 Do Q", "/XObject << /Im1 7 0 R >>", vec![img, xmp]);
+        mark(&mut doc, 0, &[[100.0, 100.0, 140.0, 140.0]], "");
+        let report = apply(&mut doc, None).unwrap();
+        assert_eq!((report.images_removed, report.images_cleared), (0, 1), "{filter}");
+        let bytes = write_full(&doc, &SaveOptions::default()).unwrap();
+        for secret in [&b"SECRET-XMP-THUMBNAIL"[..], b"SECRET-OPI-ORIGINAL", b"SECRET-ID"] {
+            assert!(!bytes.windows(secret.len()).any(|w| w == secret), "{} survived ({filter})", String::from_utf8_lossy(secret));
+        }
+    }
+}
+
 #[test]
 fn jpeg_redaction_rejects_inconsistent_dimensions_and_color_spaces() {
     let jpeg = jpeg_fixture(false);

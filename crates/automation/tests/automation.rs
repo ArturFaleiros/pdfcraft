@@ -8220,6 +8220,15 @@ fn docx_open_insert_combine_and_root_confinement() {
     let text = page_text(&mut a, cid);
     assert_eq!(text.len(), 5);
     assert!(text[2].contains("Page 1") && text[4].contains("Page 3"));
+    // Create PDF from multiple files reports each Office conversion, in both modes.
+    let multiple = ok(&mut a, "doc_create_multiple", json!({ "paths": ["b.pdf", "report.docx"], "out": "multiple.pdf" }));
+    assert_eq!(multiple["conversions"].as_array().map(Vec::len), Some(1), "{multiple}");
+    assert_eq!(multiple["conversions"][0]["path"], "report.docx");
+    assert_eq!(multiple["conversions"][0]["kind"], "Word");
+    let separate = ok(&mut a, "doc_create_multiple", json!({ "paths": ["b.pdf", "report.docx"], "mode": "separate", "out_dir": "each" }));
+    assert_eq!(separate["files"][0]["skipped"], "already a PDF");
+    assert_eq!(separate["files"][1]["conversion"]["kind"], "Word", "{separate}");
+    assert_eq!(separate["files"][1]["conversion"]["pages"], 3);
     let created = ok(&mut a, "doc_create", json!({ "from": "office", "path": "report.docx", "name": "Custom.pdf" }));
     assert_eq!(created["name"], "Custom.pdf");
     let outside = dir.with_extension("docx");
@@ -8233,8 +8242,10 @@ fn docx_open_insert_combine_and_root_confinement() {
         let error = a.call(tool, &args).unwrap_err().to_string();
         assert!(error.contains("outside"), "{tool}: {error}");
     }
-    let error = a.call("doc_combine", &json!({ "paths": ["b.pdf", escape] })).unwrap_err().to_string();
-    assert!(error.contains("outside"), "{error}");
+    for tool in ["doc_combine", "doc_create_multiple"] {
+        let error = a.call(tool, &json!({ "paths": ["b.pdf", escape] })).unwrap_err().to_string();
+        assert!(error.contains("outside"), "{tool}: {error}");
+    }
     std::fs::remove_file(outside).unwrap();
     std::fs::write(dir.join("broken.docx"), b"PK\x03\x04").unwrap();
     let before = page_text(&mut a, base);

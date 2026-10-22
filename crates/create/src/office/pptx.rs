@@ -17,7 +17,10 @@ use super::{Notes, RunStyle, family_of, hex_color};
 
 const EMU: f64 = 12_700.0;
 const MAX_DEPTH: usize = 24;
+/// The shapes drawn on one slide, its master's and layout's included.
 const MAX_SHAPES: usize = 20_000;
+/// The shapes drawn across the whole deck (a master's shapes count again on every slide).
+const MAX_DECK_SHAPES: usize = 500_000;
 
 // ── colours ─────────────────────────────────────────────────────────────────────────────────
 
@@ -420,7 +423,10 @@ struct Cx<'z, 'd> {
     images: HashMap<String, Option<ObjRef>>,
     slide_no: usize,
     slides: usize,
+    /// Shapes met on this slide and in the whole deck, and whether this slide was cut short.
     shapes: usize,
+    deck_shapes: usize,
+    cut: bool,
 }
 
 impl Cx<'_, '_> {
@@ -940,7 +946,12 @@ fn shapes(
     }
     for e in tree.children().filter(Node::is_element) {
         cx.shapes = cx.shapes.saturating_add(1);
-        if cx.shapes > MAX_SHAPES {
+        cx.deck_shapes = cx.deck_shapes.saturating_add(1);
+        if cx.shapes > MAX_SHAPES || cx.deck_shapes > MAX_DECK_SHAPES {
+            if !cx.cut {
+                cx.cut = true;
+                cx.notes.add("slides with more shapes than the importer draws, cut short");
+            }
             return;
         }
         let name = e.tag_name().name();
@@ -1334,7 +1345,7 @@ pub(crate) fn convert(zip: &Zip<'_>, main: &str, doc: &mut Document, notes: &mut
         })
         .map(|(i, _)| i)
         .collect();
-    let mut cx = Cx { zip, doc, notes, images: HashMap::new(), slide_no: 0, slides: visible.len(), shapes: 0 };
+    let mut cx = Cx { zip, doc, notes, images: HashMap::new(), slide_no: 0, slides: visible.len(), shapes: 0, deck_shapes: 0, cut: false };
     for (k, i) in visible.iter().enumerate() {
         let Some((part, srels, layout, lrels, master, mrels, theme)) = plan.get(*i) else { continue };
         let parse = |p: &Option<String>| p.as_ref().and_then(|p| texts.get(p)).and_then(|t| xml::parse(t).ok());
@@ -1366,6 +1377,7 @@ pub(crate) fn convert(zip: &Zip<'_>, main: &str, doc: &mut Document, notes: &mut
             other,
         };
         cx.slide_no = k + 1;
+        (cx.shapes, cx.cut) = (0, false);
         let pi = canvas.new_page(w, h)?;
         let Some(page) = canvas.page(pi) else { continue };
         let space = Space { h };

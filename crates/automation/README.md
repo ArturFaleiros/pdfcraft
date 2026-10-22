@@ -226,7 +226,9 @@ pages and stays undoable; both return the same `office` report. `doc_combine` re
 `conversions`. Source DOCX files are read only, Save requires a PDF destination, and `--root`
 and existing PDF password behavior are preserved.
 
-`doc_create_multiple` and `doc_batch` also convert Office files like images and text. See
+`doc_create_multiple` and `doc_batch` also convert Office files like images and text;
+`doc_create_multiple` lists each Office file's report under `conversions` (mode "combine") or
+`conversion` (each file, mode "separate"). See
 [Word, PowerPoint and Excel to PDF](../../docs/office-import.md).
 
 ## Viewer navigation history

@@ -319,6 +319,11 @@ fn powerpoint_slides_with_inherited_placeholders_bullets_shapes_and_pictures() {
 // ── Excel ───────────────────────────────────────────────────────────────────────────────────
 
 fn xlsx(sheet: &str, extra_sheets: &[(&str, &str, bool)]) -> Vec<u8> {
+    xlsx_with(sheet, extra_sheets, "")
+}
+
+/// [`xlsx`] with `workbook_pr` (a `<workbookPr>` element, or nothing) in the workbook.
+fn xlsx_with(sheet: &str, extra_sheets: &[(&str, &str, bool)], workbook_pr: &str) -> Vec<u8> {
     let styles = format!(
         r#"<styleSheet xmlns="{S}"><numFmts count="2"><numFmt numFmtId="164" formatCode="[$R$-416]\ #,##0.00"/><numFmt numFmtId="165" formatCode="dd/mm/yyyy"/></numFmts>
         <fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font></fonts>
@@ -340,7 +345,7 @@ fn xlsx(sheet: &str, extra_sheets: &[(&str, &str, bool)]) -> Vec<u8> {
         wb_rels.push((id, "worksheet", format!("worksheets/sheet{}.xml", i + 2)));
         parts.push((format!("xl/worksheets/sheet{}.xml", i + 2), format!(r#"<worksheet xmlns="{S}" xmlns:r="{R}">{body}</worksheet>"#).into_bytes()));
     }
-    let wb = format!(r#"<workbook xmlns="{S}" xmlns:r="{R}"><sheets>{sheets}</sheets></workbook>"#);
+    let wb = format!(r#"<workbook xmlns="{S}" xmlns:r="{R}">{workbook_pr}<sheets>{sheets}</sheets></workbook>"#);
     let mut r: Vec<(&str, &str, &str)> = wb_rels.iter().map(|(a, b, c)| (a.as_str(), *b, c.as_str())).collect();
     r.push(("rIdSt", "styles", "styles.xml"));
     r.push(("rIdSs", "sharedStrings", "sharedStrings.xml"));
@@ -543,4 +548,76 @@ fn turkish_and_central_european_letters_are_drawn_not_escaped() {
         let m = pdfcraft_fonts::pdf::Metrics::from_dict(&doc, f);
         assert_eq!(m.width(u32::from(latin::code('ğ').unwrap())) * 1000.0, face.width(b'g'));
     }
+}
+
+/// PAGEREF (a table of contents' page number) keeps Word's cached result; only PAGE, NUMPAGES and
+/// SECTIONPAGES are page fields, with or without a cached result.
+#[test]
+fn page_reference_fields_keep_their_cached_result() {
+    let field = |instr: &str, cached: Option<&str>| {
+        let result = cached.map_or(String::new(), |c| format!(r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>{c}</w:t></w:r>"#));
+        format!(
+            r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> {instr} </w:instrText></w:r>{result}<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#
+        )
+    };
+    let body = [
+        p("Contents"),
+        field(r"PAGEREF _Toc123 \h", Some("77")),
+        r#"<w:p><w:fldSimple w:instr=" PAGEREF _Toc456 \h "><w:r><w:t>88</w:t></w:r></w:fldSimple></w:p>"#.to_string(),
+        field("PAGE", Some("9")),
+        field("SECTIONPAGES", None),
+        field("NUMPAGESX", Some("66")),
+    ]
+    .concat();
+    let (doc, report) = from_office("toc.docx", &docx(&body, &[], &[])).unwrap();
+    assert_eq!(report.pages, 1);
+    let text = all_text(&reopen(&doc));
+    assert!(text.contains("(77)") && text.contains("(88)"), "the cross-reference page numbers Word cached: {text}");
+    assert!(!text.contains("(9)"), "PAGE is the live page number, not its cached 9");
+    assert_eq!(text.matches("(1)").count(), 2, "PAGE and SECTIONPAGES (no cached result) both show 1: {text}");
+    assert!(text.contains("(66)"), "a field merely starting with NUMPAGES keeps its cached result");
+}
+
+/// The shape limit is per slide: a deck whose slides together pass it draws every slide, and a
+/// slide past it is reported.
+#[test]
+fn the_shape_limit_applies_per_slide_and_is_reported() {
+    let shape = |i: usize| {
+        format!(
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="{i}" name="S"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="100" cy="100"/></a:xfrm><a:prstGeom prst="rect"/></p:spPr></p:sp>"#
+        )
+    };
+    let label = |t: &str| {
+        format!(
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="1" name="L"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="3000000" cy="500000"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:t>{t}</a:t></a:r></a:p></p:txBody></p:sp>"#
+        )
+    };
+    let busy: String = (0..12_000).map(shape).collect();
+    let first = format!("{busy}{}", label("Primeiro"));
+    let second = format!("{busy}{}", label("Segundo"));
+    let (doc, report) = from_office("busy.pptx", &pptx(&[&first, &second], &[])).unwrap();
+    assert!(!report.notes.iter().any(|n| n.contains("cut short")), "{report:?}");
+    let doc = reopen(&doc);
+    assert!(all_text(&doc).contains("(Segundo)"), "the second slide is drawn, not cut by the first slide's shapes");
+    let crowded: String = (0..20_010).map(shape).collect();
+    let (_, report) = from_office("crowded.pptx", &pptx(&[&crowded], &[])).unwrap();
+    assert!(report.notes.iter().any(|n| n.contains("cut short")), "{report:?}");
+}
+
+/// Workbooks saved with the 1904 date system (older Excel for Mac) show their own dates, not dates
+/// 66 years later.
+#[test]
+fn dates_in_1904_workbooks_are_not_shifted() {
+    let sheet = |day: u32| {
+        format!(
+            r#"<cols><col min="1" max="3" width="14" customWidth="1"/></cols><sheetData><row r="1"><c r="A1" s="2"><v>0</v></c><c r="B1" s="2"><v>{day}</v></c><c r="C1" s="2"><v>61</v></c></row></sheetData>"#
+        )
+    };
+    // 14 March 2019 is day 43538 in the 1900 system and day 42076 (1,462 fewer) in the 1904 one.
+    let (doc, _) = from_office("1900.xlsx", &xlsx(&sheet(43_538), &[])).unwrap();
+    let text = all_text(&reopen(&doc));
+    assert!(text.contains("(14/03/2019)") && text.contains("(01/03/1900)"), "the 1900 system, around its 29 February 1900: {text}");
+    let (doc, _) = from_office("1904.xlsx", &xlsx_with(&sheet(42_076), &[], r#"<workbookPr date1904="1"/>"#)).unwrap();
+    let text = all_text(&reopen(&doc));
+    assert!(text.contains("(01/01/1904)") && text.contains("(14/03/2019)") && text.contains("(02/03/1904)"), "{text}");
 }

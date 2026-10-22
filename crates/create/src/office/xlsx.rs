@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use chrono::Datelike;
 use pdfcraft_cos::Document;
 use roxmltree::Node;
 
@@ -560,20 +561,6 @@ const MESES: [&str; 12] =
 const DAYS: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const DIAS: [&str; 7] = ["domingo", "segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sábado"];
 
-/// Civil date from days since 1970-01-01 (H. Hinnant's algorithm).
-fn civil(days: i64) -> (i64, u32, u32) {
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
-}
-
 fn date(serial: f64, sec: &Section, date1904: bool) -> Option<String> {
     if !serial.is_finite() || !(-1.0..3_000_000.0).contains(&serial) {
         return None;
@@ -582,16 +569,19 @@ fn date(serial: f64, sec: &Section, date1904: bool) -> Option<String> {
     let mut secs = ((serial - serial.floor()) * 86_400.0).round() as i64;
     let day = day + secs / 86_400;
     secs %= 86_400;
-    // The 1900 system counts a 29 February 1900 that never was (serial 60).
-    let unix_days = if date1904 {
-        day + 24_107 - 25_569 + 1_462
+    // Days from 1 January of year 1 (chrono's day 1). The 1904 system's day 0 is 1 January 1904;
+    // the 1900 system's day 1 is 1 January 1900, and it counts a 29 February 1900 that never was
+    // (serial 60).
+    let ce_days = if date1904 {
+        day + 695_056
     } else if day >= 60 {
-        day - 25_569
+        day + 693_594
     } else {
-        day - 25_568
+        day + 693_595
     };
-    let (y, m, d) = civil(unix_days);
-    let weekday = (unix_days + 4).rem_euclid(7) as usize;
+    let date = chrono::NaiveDate::from_num_days_from_ce_opt(i32::try_from(ce_days).ok()?)?;
+    let (y, m, d) = (i64::from(date.year()), date.month(), date.day());
+    let weekday = date.weekday().num_days_from_sunday() as usize;
     let (h, mi, s) = (secs / 3600, (secs / 60) % 60, secs % 60);
     let ampm = sec.tokens.iter().any(|t| t == "ampm" || t == "ap");
     let pt = portuguese(sec.lcid);
@@ -1017,14 +1007,14 @@ fn draw_sheet(canvas: &mut Canvas, sh: &Sheet, styles: &Styles, notes: &mut Note
     let row_bands = bands(max_row, &row_h, area_h / k);
     for (c0, c1) in &col_bands {
         for (r0, r1) in &row_bands {
+            // Skip a page with nothing on it, before its merges are looked for.
+            if !sh.cells.range((*r0, 0)..=(*r1, u32::MAX)).any(|((_, c), _)| (*c0..=*c1).contains(c)) {
+                continue;
+            }
             // Only the merges that touch this page are searched for each of its cells.
             let merges: Vec<(u32, u32, u32, u32)> =
                 sh.merges.iter().copied().filter(|(mr1, mc1, mr2, mc2)| *mr1 <= *r1 && *mr2 >= *r0 && *mc1 <= *c1 && *mc2 >= *c0).collect();
             let merged_at = |r: u32, c: u32| merges.iter().find(|(r1, c1, r2, c2)| (*r1..=*r2).contains(&r) && (*c1..=*c2).contains(&c)).copied();
-            // Skip a page with nothing on it.
-            if !sh.cells.range((*r0, 0)..=(*r1, u32::MAX)).any(|((_, c), _)| (*c0..=*c1).contains(c)) {
-                continue;
-            }
             let pi = canvas.new_page(pw, ph)?;
             let Some(page) = canvas.page(pi) else { continue };
             // Scale about the printable area's top-left corner.

@@ -803,12 +803,8 @@ impl Cx<'_, '_> {
                     }
                 }
                 "fldSimple" => {
-                    let instr = attr(c, "instr").unwrap_or_default().trim().to_ascii_uppercase();
-                    let style = self.run_props(None, base);
-                    if instr.starts_with("PAGE") {
-                        para.items.push(Inline::Field(Field::Page, style));
-                    } else if instr.starts_with("NUMPAGES") || instr.starts_with("SECTIONPAGES") {
-                        para.items.push(Inline::Field(Field::Pages, style));
+                    if let Some(field) = page_field(attr(c, "instr").unwrap_or_default()) {
+                        para.items.push(Inline::Field(field, self.run_props(None, base)));
                     } else {
                         self.inline(c, rels, base, para, out, extra, state, depth + 1);
                     }
@@ -858,31 +854,19 @@ impl Cx<'_, '_> {
                 ("fldChar", _) => match attr(c, "fldCharType") {
                     Some("begin") => *state = FieldState::Instr(String::new()),
                     Some("separate") => {
-                        let live = if let FieldState::Instr(i) = &*state {
-                            let i = i.trim().to_ascii_uppercase();
-                            if i.starts_with("PAGE") {
-                                para.items.push(Inline::Field(Field::Page, style.clone()));
-                                true
-                            } else if i.starts_with("NUMPAGES") || i.starts_with("SECTIONPAGES") {
-                                para.items.push(Inline::Field(Field::Pages, style.clone()));
-                                true
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        };
+                        let field = if let FieldState::Instr(i) = &*state { page_field(i) } else { None };
+                        if let Some(field) = field {
+                            para.items.push(Inline::Field(field, style.clone()));
+                        }
+                        let live = field.is_some();
                         *state = FieldState::Result(live);
                     }
                     Some("end") => {
-                        if let FieldState::Instr(i) = &*state {
-                            // A field with no cached result: only page fields can still be shown.
-                            let i = i.trim().to_ascii_uppercase();
-                            if i.starts_with("PAGE") {
-                                para.items.push(Inline::Field(Field::Page, style.clone()));
-                            } else if i.starts_with("NUMPAGES") {
-                                para.items.push(Inline::Field(Field::Pages, style.clone()));
-                            }
+                        // A field with no cached result: only page fields can still be shown.
+                        if let FieldState::Instr(i) = &*state
+                            && let Some(field) = page_field(i)
+                        {
+                            para.items.push(Inline::Field(field, style.clone()));
                         }
                         *state = FieldState::None;
                     }
@@ -1108,6 +1092,20 @@ fn vml_size(style: &str) -> (f64, f64) {
         })
     };
     (get("width").unwrap_or(72.0).clamp(1.0, 14_400.0), get("height").unwrap_or(72.0).clamp(1.0, 14_400.0))
+}
+
+/// The page field a field instruction names, by its first word: `PAGEREF` (a table of contents'
+/// or cross-reference's page number) and `PAGES…` look alike but are not page fields, and keep
+/// their cached result.
+fn page_field(instr: &str) -> Option<Field> {
+    let name = instr.split_whitespace().next()?;
+    if name.eq_ignore_ascii_case("PAGE") {
+        Some(Field::Page)
+    } else if name.eq_ignore_ascii_case("NUMPAGES") || name.eq_ignore_ascii_case("SECTIONPAGES") {
+        Some(Field::Pages)
+    } else {
+        None
+    }
 }
 
 // ── layout ──────────────────────────────────────────────────────────────────────────────────

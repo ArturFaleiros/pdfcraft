@@ -34,7 +34,8 @@ Layer L4. Create a PDF (Acrobat's Create a PDF tool), execution plan M10.2:
 `source_kind` recognises Office packages (and encrypted ones, which `from_office` refuses with a
 reason) by name and signature as `SourceKind::Office`.
 
-Every function returns a `pdfcraft_cos::Document`; the caller writes it.
+Every function returns a `pdfcraft_cos::Document`; the caller writes it. `from_office` also returns its
+`OfficeReport`, which the caller shows: it is the only record of what the conversion approximated.
 
 Image export and Save Image As apply each lossless image's Decode pair before converting its color components.
 Indexed Decode values select palette entries after rounding and clipping. Color-key masks compare the original samples.

@@ -410,3 +410,68 @@ fn docx_opens_inserts_and_combines_as_pdf_pages() {
         h.render().unwrap().save(path).unwrap();
     }
 }
+
+/// A Word package written uncompressed (the importer doesn't check CRCs), with an equation: the
+/// importer writes equations as plain text and says so in its report.
+fn docx_with_equation() -> Vec<u8> {
+    const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    const M: &str = "http://schemas.openxmlformats.org/officeDocument/2006/math";
+    const REL: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
+    let document = format!(
+        r#"<w:document xmlns:w="{W}" xmlns:m="{M}"><w:body><w:p><w:r><w:t>Area</w:t></w:r><m:oMath><m:r><m:t>a=b+c</m:t></m:r></m:oMath></w:p></w:body></w:document>"#
+    );
+    let rels = format!(
+        r#"<Relationships xmlns="{REL}"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#
+    );
+    let parts = [("[Content_Types].xml", "<Types/>".to_string()), ("_rels/.rels", rels), ("word/document.xml", document)];
+    let (mut out, mut central) = (Vec::new(), Vec::new());
+    for (name, data) in &parts {
+        let offset = out.len() as u32;
+        let sizes = [(data.len() as u32).to_le_bytes(), (data.len() as u32).to_le_bytes()].concat();
+        out.extend_from_slice(b"PK\x03\x04\x14\0\0\0\0\0");
+        out.extend_from_slice(&[0; 8]);
+        out.extend_from_slice(&sizes);
+        out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        out.extend_from_slice(&[0, 0]);
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(data.as_bytes());
+        central.extend_from_slice(b"PK\x01\x02\x14\0\x14\0\0\0\0\0");
+        central.extend_from_slice(&[0; 8]);
+        central.extend_from_slice(&sizes);
+        central.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        central.extend_from_slice(&[0; 12]);
+        central.extend_from_slice(&offset.to_le_bytes());
+        central.extend_from_slice(name.as_bytes());
+    }
+    let start = out.len() as u32;
+    out.extend_from_slice(&central);
+    out.extend_from_slice(b"PK\x05\x06\0\0\0\0");
+    out.extend_from_slice(&[parts.len() as u8, 0, parts.len() as u8, 0]);
+    out.extend_from_slice(&(central.len() as u32).to_le_bytes());
+    out.extend_from_slice(&start.to_le_bytes());
+    out.extend_from_slice(&[0, 0]);
+    out
+}
+
+/// Create PDF from multiple files says what an Office conversion approximated, in both modes,
+/// as opening, inserting and combining one do.
+#[test]
+fn create_from_multiple_files_reports_office_approximations() {
+    use pdfcraft_ui_egui::FilePurpose;
+    let docx = docx_with_equation();
+    let mut app = PdfCraftApp::new();
+    app.set_option("language", "en").unwrap();
+    app.use_files(FilePurpose::CreateMultiple, vec![("formula.docx".into(), docx.clone()), ("scan.png".into(), png())]);
+    let toast = app.toast.as_ref().map(|(t, _)| t.clone()).unwrap_or_default();
+    assert!(toast.starts_with("Created a PDF from 2 files"), "{toast}");
+    assert!(toast.contains("Converted formula.docx. Approximated: equations, written as plain text: 1"), "{toast}");
+    let dir = std::env::temp_dir().join(format!("pdfcraft-create-separate-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    app.export_dir_override = Some(dir.to_string_lossy().into_owned());
+    app.use_files(FilePurpose::CreateMultipleSeparate, vec![("formula.docx".into(), docx)]);
+    let toast = app.toast.as_ref().map(|(t, _)| t.clone()).unwrap_or_default();
+    assert!(toast.starts_with("Wrote 1 files to") && toast.contains("Converted formula.docx. Approximated: equations"), "{toast}");
+    assert!(dir.join("formula.pdf").exists());
+    std::fs::remove_dir_all(&dir).unwrap();
+}

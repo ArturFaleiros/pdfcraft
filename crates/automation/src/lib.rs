@@ -1715,16 +1715,26 @@ impl Automation {
             Some(_) => return Err(ToolError::InvalidArgs("pages must list a range (or null) for each path".into())),
         };
         // Each file is read, converted and copied in turn, so a long list holds one file at a time.
+        let mut conversions = Vec::new();
         let sources = paths.into_iter().zip(ranges).map(|(p, range)| -> std::result::Result<pdfcraft_engine::CombineSource, ToolError> {
             let path = self.resolve(p, false)?;
             let bytes = std::fs::read(&path).map_err(|e| failed(format!("{}: {e}", path.display())))?;
             let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            let (_, pdf) = self.session.convert_to_pdf(&name, &Arc::new(bytes)).map_err(failed)?;
+            let (_, pdf, report) = self.session.convert_to_pdf_reported(&name, &Arc::new(bytes)).map_err(failed)?;
+            if let Some(report) = report {
+                let mut conversion = office_report(&report);
+                conversion["path"] = json!(p);
+                conversions.push(conversion);
+            }
             let title = path.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             Ok((title, pdf, range))
         });
         let bytes = self.session.combine_each(sources)?.ok_or_else(|| ToolError::InvalidArgs("paths must list at least one file".into()))?;
-        self.deliver(a, "Combined", bytes)
+        let mut result = self.deliver(a, "Combined", bytes)?;
+        if !conversions.is_empty() {
+            result["conversions"] = json!(conversions);
+        }
+        Ok(result)
     }
 
     /// One PDF per file, written into `out_dir`; a file that fails doesn't stop the others.
@@ -1737,15 +1747,19 @@ impl Automation {
                 let bytes = std::fs::read(&src).map_err(|e| format!("{}: {e}", src.display()))?;
                 let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 let stem = src.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "document".into());
-                let (kind, pdf) = self.session.convert_to_pdf(&name, &Arc::new(bytes)).map_err(|e| e.to_string())?;
-                Ok((kind, stem, pdf))
+                let (kind, pdf, report) = self.session.convert_to_pdf_reported(&name, &Arc::new(bytes)).map_err(|e| e.to_string())?;
+                Ok((kind, stem, pdf, report))
             });
             out.push(match converted {
                 Ok((pdfcraft_engine::SourceKind::Pdf, ..)) => json!({ "path": p, "skipped": "already a PDF" }),
-                Ok((_, stem, pdf)) => {
+                Ok((_, stem, pdf, report)) => {
                     let target = unused(&dir, &stem);
                     write_atomic(&target, &pdf)?;
-                    json!({ "path": p, "output": target.to_string_lossy(), "bytes": pdf.len() })
+                    let mut file = json!({ "path": p, "output": target.to_string_lossy(), "bytes": pdf.len() });
+                    if let Some(report) = report {
+                        file["conversion"] = office_report(&report);
+                    }
+                    file
                 }
                 Err(e) => json!({ "path": p, "error": e }),
             });

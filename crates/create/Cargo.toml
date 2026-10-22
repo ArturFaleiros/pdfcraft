@@ -24,6 +24,8 @@ encoding_rs = "0.8"
 # (flate2 through cos, roxmltree through xfa and xfdf).
 flate2 = { workspace = true }
 roxmltree = "0.20"
+# Excel date serials become calendar dates through chrono (no hand-rolled calendar code).
+chrono = { workspace = true }
 
 [dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg"] }
