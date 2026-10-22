@@ -105,5 +105,5 @@ guard and, in the desktop app, off the UI thread. Macros (`vbaProject.bin`) are 
 and pixels in the test itself (no committed fixture) and checks the reopened PDF: page sizes,
 fonts, text, list labels, table cells, images, header page numbers, inherited placeholder styles,
 theme colours, autofit, number formats, merged cells, hidden content, and hostile input.
-`crates/automation/tests/automation.rs::creating_pdfs_from_word_and_powerpoint_natively` exports a
+`crates/automation/tests/it/automation.rs::creating_pdfs_from_word_and_powerpoint_natively` exports a
 PDF to `.docx` and `.pptx` with PdfCraft's own exporter and imports them back through `doc_create`.

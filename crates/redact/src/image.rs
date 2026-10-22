@@ -105,7 +105,12 @@ fn decode_and_clear(doc: &Document, s: &Stream, ctm: &Matrix, rects: &[[f64; 4]]
     if bytes > (MAX_PIXELS as usize).checked_mul(8)? {
         return None;
     }
-    let mut data = if jpeg { jpeg_samples(doc, s, w, h, ncomp, bpc)? } else { s.decoded_within(bytes).ok()? };
+    // Decode no further than the raster can need: a filter stage may legitimately produce up to
+    // twice it (ASCIIHex text under Flate) plus a PNG predictor's byte per row. Data past that
+    // can only be a decompression bomb; the image is then removed whole. JPEGs are bounded by
+    // `jpeg_samples`' own decoder limits.
+    let allowance = bytes.checked_add(h)?.checked_mul(2)?.checked_add(4096)?;
+    let mut data = if jpeg { jpeg_samples(doc, s, w, h, ncomp, bpc)? } else { s.decoded_within(allowance).ok()? };
     if data.len() < bytes {
         return None;
     }
