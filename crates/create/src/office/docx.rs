@@ -1477,8 +1477,13 @@ pub(crate) fn convert(zip: &Zip<'_>, main: &str, doc: &mut Document, notes: &mut
             if !(sec.continuous && same_size) || fl.at_top {
                 if !fl.at_top {
                     fl.new_page()?;
-                } else if let Some(s) = fl.page_sections.last_mut() {
-                    *s = si;
+                } else {
+                    // The empty page takes this section's size and starts at its top margin.
+                    if let Some(s) = fl.page_sections.last_mut() {
+                        *s = si;
+                    }
+                    fl.canvas.resize(fl.page, fl.sec.w, fl.sec.h);
+                    fl.y = fl.top();
                 }
             }
         }

@@ -324,8 +324,13 @@ fn xlsx(sheet: &str, extra_sheets: &[(&str, &str, bool)]) -> Vec<u8> {
 
 /// [`xlsx`] with `workbook_pr` (a `<workbookPr>` element, or nothing) in the workbook.
 fn xlsx_with(sheet: &str, extra_sheets: &[(&str, &str, bool)], workbook_pr: &str) -> Vec<u8> {
+    xlsx_styled(sheet, extra_sheets, workbook_pr, r"[$R$-416]\ #,##0.00")
+}
+
+/// [`xlsx_with`] with `format` as the number format of style 1 (`s="1"`).
+fn xlsx_styled(sheet: &str, extra_sheets: &[(&str, &str, bool)], workbook_pr: &str, format: &str) -> Vec<u8> {
     let styles = format!(
-        r#"<styleSheet xmlns="{S}"><numFmts count="2"><numFmt numFmtId="164" formatCode="[$R$-416]\ #,##0.00"/><numFmt numFmtId="165" formatCode="dd/mm/yyyy"/></numFmts>
+        r#"<styleSheet xmlns="{S}"><numFmts count="2"><numFmt numFmtId="164" formatCode="{format}"/><numFmt numFmtId="165" formatCode="dd/mm/yyyy"/></numFmts>
         <fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font></fonts>
         <fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor theme="4"/></patternFill></fill></fills>
         <borders count="2"><border/><border><left style="thin"/><right style="thin"/><top style="thin"/><bottom style="medium"><color rgb="FF0000FF"/></bottom></border></borders>
@@ -632,4 +637,20 @@ fn a_sparse_sheet_prints_only_its_occupied_page_quickly() {
     assert!(started.elapsed() < std::time::Duration::from_secs(20), "{:?}", started.elapsed());
     assert_eq!(report.pages, 1, "{report:?}");
     assert!(all_text(&reopen(&doc)).contains("(Fim)"));
+}
+
+/// Every cell re-reads its number format, so a format of a million zeros (Excel stops at 255
+/// characters) is shown as General, and reported, instead of padding each cell for minutes.
+#[test]
+fn an_oversized_number_format_is_shown_as_general_quickly() {
+    let rows: String = (1..=200).map(|r| format!(r#"<row r="{r}"><c r="A{r}" s="1"><v>1234.5</v></c></row>"#)).collect();
+    let sheet = format!(r#"<cols><col min="1" max="1" width="30" customWidth="1"/></cols><sheetData>{rows}</sheetData>"#);
+    let started = std::time::Instant::now();
+    let (doc, report) = from_office("zeros.xlsx", &xlsx_styled(&sheet, &[], "", &"0".repeat(1_000_000))).unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(20), "{:?}", started.elapsed());
+    assert!(report.notes.iter().any(|n| n.contains("longer than Excel allows")), "{report:?}");
+    assert!(all_text(&reopen(&doc)).contains("(1234.5)"));
+    // Excel's longest format is still read.
+    let (_, report) = from_office("long.xlsx", &xlsx_styled(&sheet, &[], "", &"0".repeat(255))).unwrap();
+    assert!(!report.notes.iter().any(|n| n.contains("longer than Excel allows")), "{report:?}");
 }

@@ -182,15 +182,27 @@ pub(crate) struct Canvas {
     pub pages: Vec<Page>,
 }
 
+/// A page side in points: at least an inch, at most PDF's 200 inches, Letter if not a number.
+fn side(v: f64) -> f64 {
+    if v.is_finite() { v.clamp(72.0, 14_400.0) } else { 612.0 }
+}
+
 impl Canvas {
     /// Start a page; `Err` past [`MAX_PAGES`].
     pub(crate) fn new_page(&mut self, w: f64, h: f64) -> Result<usize, String> {
         if self.pages.len() >= MAX_PAGES {
             return Err(format!("the document needs more than {MAX_PAGES} pages"));
         }
-        let clamp = |v: f64| if v.is_finite() { v.clamp(72.0, 14_400.0) } else { 612.0 };
-        self.pages.push(Page { w: clamp(w), h: clamp(h), ops: Vec::new(), fonts: 0, latin_fonts: 0, images: Vec::new() });
+        self.pages.push(Page { w: side(w), h: side(h), ops: Vec::new(), fonts: 0, latin_fonts: 0, images: Vec::new() });
         Ok(self.pages.len() - 1)
+    }
+
+    /// Give a page that has nothing on it yet another size.
+    pub(crate) fn resize(&mut self, i: usize, w: f64, h: f64) {
+        if let Some(p) = self.pages.get_mut(i) {
+            p.w = side(w);
+            p.h = side(h);
+        }
     }
 
     pub(crate) fn page(&mut self, i: usize) -> Option<&mut Page> {

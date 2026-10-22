@@ -22,6 +22,9 @@ const MAX_CELLS: usize = 2_000_000;
 const MAX_MERGES: usize = 20_000;
 const MAX_COL: u32 = 16_384;
 const MAX_ROW: u32 = 1_048_576;
+/// Longest number format read, in characters: Excel's own limit. Every cell re-reads its format,
+/// so this also bounds the padding and placeholders a format can ask for.
+const MAX_FORMAT_CHARS: usize = 255;
 
 // ── styles ──────────────────────────────────────────────────────────────────────────────────
 
@@ -126,7 +129,7 @@ fn theme_colors(zip: &Zip<'_>, rels: &Rels) -> Vec<[f64; 3]> {
     out
 }
 
-fn load_styles(zip: &Zip<'_>, rels: &Rels, theme: &[[f64; 3]]) -> Result<Styles, String> {
+fn load_styles(zip: &Zip<'_>, rels: &Rels, theme: &[[f64; 3]], notes: &mut Notes) -> Result<Styles, String> {
     let mut s = Styles::default();
     let Some(part) = rels.of_type("styles") else { return Ok(s) };
     let Some(text) = zip.text(part)? else { return Ok(s) };
@@ -135,6 +138,12 @@ fn load_styles(zip: &Zip<'_>, rels: &Rels, theme: &[[f64; 3]]) -> Result<Styles,
     if let Some(f) = child(root, "numFmts") {
         for n in children(f, "numFmt") {
             if let (Some(id), Some(code)) = (attr_f64(n, "numFmtId"), attr(n, "formatCode")) {
+                let code = if code.chars().nth(MAX_FORMAT_CHARS).is_some() {
+                    notes.add("number formats longer than Excel allows, shown as General");
+                    "General"
+                } else {
+                    code
+                };
                 s.formats.insert(id.clamp(0.0, 1e6) as u32, code.to_owned());
             }
         }
@@ -690,8 +699,8 @@ fn format_number(v: f64, code: &str, date1904: bool) -> (String, bool) {
         let s = format!("{:.*}", decimals, x.abs());
         let (int, frac) = s.split_once('.').unwrap_or((&s, ""));
         let mut int = int.trim_start_matches('0').to_string();
-        while int.len() < sec.int_zeros {
-            int.insert(0, '0');
+        if int.len() < sec.int_zeros {
+            int.insert_str(0, &"0".repeat(sec.int_zeros - int.len()));
         }
         if sec.grouping {
             int = group(&int, group_sep);
@@ -1040,10 +1049,16 @@ fn draw_sheet(canvas: &mut Canvas, sh: &Sheet, styles: &Styles, notes: &mut Note
                 page.line(xa, y_of(r), xb, y_of(r), 0.25, [0.75; 3]);
             }
         }
-        // Fills first, then text, then borders on top.
-        let mut cells_here: Vec<(&(u32, u32), &Cell)> =
-            sh.cells.range((*r0, 0)..=(*r1, u32::MAX)).filter(|((_, c), _)| (*c0..=*c1).contains(c)).collect();
-        cells_here.sort_by_key(|(k, _)| **k);
+        // Fills first, then text, then borders on top. The page's cells, row by occupied row and
+        // only within its columns, already in (row, col) order: a wide sheet's row band holds
+        // every column band's cells, and a band of hidden rows can be a million rows tall.
+        let next_row = |from: u32| (from <= *r1).then(|| sh.cells.range((from, 0)..=(*r1, u32::MAX)).next()).flatten().map(|((r, _), _)| *r);
+        let mut cells_here: Vec<(&(u32, u32), &Cell)> = Vec::new();
+        let mut row = next_row(*r0);
+        while let Some(r) = row {
+            cells_here.extend(sh.cells.range((r, *c0)..=(r, *c1)));
+            row = r.checked_add(1).and_then(next_row);
+        }
         let rect = |r: u32, c: u32| -> (f64, f64, f64, f64) {
             let (r2, c2) = match merged_at(r, c) {
                 Some((mr1, mc1, mr2, mc2)) if mr1 == r && mc1 == c => (mr2.min(*r1), mc2.min(*c1)),
@@ -1161,7 +1176,7 @@ pub(crate) fn convert(zip: &Zip<'_>, main: &str, doc: &mut Document, notes: &mut
     let root = wb.root_element();
     let date1904 = child(root, "workbookPr").is_some_and(|p| flag(attr(p, "date1904")) && attr(p, "date1904").is_some());
     let theme = theme_colors(zip, &rels);
-    let styles = load_styles(zip, &rels, &theme)?;
+    let styles = load_styles(zip, &rels, &theme, notes)?;
     let shared = shared_strings(zip, &rels)?;
     let mut canvas = Canvas::default();
     for s in child(root, "sheets").into_iter().flat_map(|s| children(s, "sheet")) {
@@ -1203,6 +1218,8 @@ mod tests {
         assert_eq!(f(0.5, "h:mm AM/PM"), "12:00 PM");
         assert_eq!(f(1.0 / 3.0, "General"), "0.3333333333");
         assert_eq!(f(2.5, "0"), "3", "halves round away from zero, as in Excel");
+        assert_eq!(f(7.0, "000"), "007");
+        assert_eq!(f(-1234.0, "000000"), "-001234");
         assert_eq!(f(45000.5, "\"Hoje é\" h AM/PM"), "Hoje é 12 PM");
         assert_eq!(f(1e20, "General"), "1E+20");
         assert_eq!(f(f64::MAX, "yyyy"), general(f64::MAX));
