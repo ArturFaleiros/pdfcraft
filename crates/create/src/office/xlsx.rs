@@ -1040,10 +1040,19 @@ fn draw_sheet(canvas: &mut Canvas, sh: &Sheet, styles: &Styles, notes: &mut Note
                 page.line(xa, y_of(r), xb, y_of(r), 0.25, [0.75; 3]);
             }
         }
-        // Fills first, then text, then borders on top.
-        let mut cells_here: Vec<(&(u32, u32), &Cell)> =
-            sh.cells.range((*r0, 0)..=(*r1, u32::MAX)).filter(|((_, c), _)| (*c0..=*c1).contains(c)).collect();
-        cells_here.sort_by_key(|(k, _)| **k);
+        // Fills first, then text, then borders on top. The page's cells, row by row, in the map's
+        // order: each step seeks the next row that has a cell, so neither the sheet's other columns
+        // nor its empty rows are walked.
+        let mut cells_here: Vec<(&(u32, u32), &Cell)> = Vec::new();
+        let mut from = (*r0, *c0);
+        while let Some((&(r, _), _)) = sh.cells.range(from..=(*r1, u32::MAX)).next() {
+            cells_here.extend(sh.cells.range((r, *c0)..=(r, *c1)));
+            // `range` panics on a start past its end: stop after the page's last row.
+            match r.checked_add(1) {
+                Some(next) if next <= *r1 => from = (next, *c0),
+                _ => break,
+            }
+        }
         let rect = |r: u32, c: u32| -> (f64, f64, f64, f64) {
             let (r2, c2) = match merged_at(r, c) {
                 Some((mr1, mc1, mr2, mc2)) if mr1 == r && mc1 == c => (mr2.min(*r1), mc2.min(*c1)),
