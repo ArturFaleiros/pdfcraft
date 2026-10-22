@@ -621,3 +621,15 @@ fn dates_in_1904_workbooks_are_not_shifted() {
     let text = all_text(&reopen(&doc));
     assert!(text.contains("(01/01/1904)") && text.contains("(14/03/2019)") && text.contains("(02/03/1904)"), "{text}");
 }
+
+/// A sheet with one value in its last cell, columns as wide and rows as tall as Excel allows, has
+/// billions of empty print pages: only the page with the value is looked at.
+#[test]
+fn a_sparse_sheet_prints_only_its_occupied_page_quickly() {
+    let sheet = r#"<sheetFormatPr defaultColWidth="400" defaultRowHeight="409"/><sheetData><row r="1048576"><c r="XFD1048576" t="inlineStr"><is><t>Fim</t></is></c></row></sheetData><mergeCells count="1"><mergeCell ref="A1:B2"/></mergeCells>"#;
+    let started = std::time::Instant::now();
+    let (doc, report) = from_office("sparse.xlsx", &xlsx(sheet, &[])).unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(20), "{:?}", started.elapsed());
+    assert_eq!(report.pages, 1, "{report:?}");
+    assert!(all_text(&reopen(&doc)).contains("(Fim)"));
+}

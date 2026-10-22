@@ -4,7 +4,7 @@
 //! formatted with their number formats (dates, currency, percentages…), and fonts, fills,
 //! borders, alignment, wrapping and merged cells are kept. Formulas show their cached results.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use chrono::Datelike;
 use pdfcraft_cos::Document;
@@ -1005,148 +1005,147 @@ fn draw_sheet(canvas: &mut Canvas, sh: &Sheet, styles: &Styles, notes: &mut Note
     };
     let col_bands = bands(max_col, &width, area_w / k);
     let row_bands = bands(max_row, &row_h, area_h / k);
-    for (c0, c1) in &col_bands {
-        for (r0, r1) in &row_bands {
-            // Skip a page with nothing on it, before its merges are looked for.
-            if !sh.cells.range((*r0, 0)..=(*r1, u32::MAX)).any(|((_, c), _)| (*c0..=*c1).contains(c)) {
+    // Only the pages a cell is on, found from the cells: a sparse sheet (one value at XFD1048576,
+    // wide columns, tall rows) has billions of empty ones. Ordered down, then over.
+    let band_of = |bands: &[(u32, u32)], i: u32| bands.partition_point(|(_, end)| *end < i);
+    let pages: BTreeSet<(usize, usize)> = sh.cells.keys().map(|(r, c)| (band_of(&col_bands, *c), band_of(&row_bands, *r))).collect();
+    for (ci, ri) in pages {
+        let (Some((c0, c1)), Some((r0, r1))) = (col_bands.get(ci), row_bands.get(ri)) else { continue };
+        // Only the merges that touch this page are searched for each of its cells.
+        let merges: Vec<(u32, u32, u32, u32)> =
+            sh.merges.iter().copied().filter(|(mr1, mc1, mr2, mc2)| *mr1 <= *r1 && *mr2 >= *r0 && *mc1 <= *c1 && *mc2 >= *c0).collect();
+        let merged_at = |r: u32, c: u32| merges.iter().find(|(r1, c1, r2, c2)| (*r1..=*r2).contains(&r) && (*c1..=*c2).contains(&c)).copied();
+        let pi = canvas.new_page(pw, ph)?;
+        let Some(page) = canvas.page(pi) else { continue };
+        // Scale about the printable area's top-left corner.
+        page.save();
+        if (k - 1.0).abs() > 1e-6 {
+            page.raw(&format!(
+                "{} 0 0 {} {} {} cm\n",
+                super::canvas::n(k),
+                super::canvas::n(k),
+                super::canvas::n(ml * (1.0 - k)),
+                super::canvas::n((ph - mt) * (1.0 - k))
+            ));
+        }
+        let x_of = |c: u32| ml + (*c0..c).map(width).sum::<f64>();
+        let y_of = |r: u32| ph - mt - (*r0..r).map(row_h).sum::<f64>();
+        if sh.gridlines {
+            let (xa, xb) = (x_of(*c0), x_of(c1 + 1));
+            let (ya, yb) = (y_of(*r0), y_of(r1 + 1));
+            for c in *c0..=c1 + 1 {
+                page.line(x_of(c), ya, x_of(c), yb, 0.25, [0.75; 3]);
+            }
+            for r in *r0..=r1 + 1 {
+                page.line(xa, y_of(r), xb, y_of(r), 0.25, [0.75; 3]);
+            }
+        }
+        // Fills first, then text, then borders on top.
+        let mut cells_here: Vec<(&(u32, u32), &Cell)> =
+            sh.cells.range((*r0, 0)..=(*r1, u32::MAX)).filter(|((_, c), _)| (*c0..=*c1).contains(c)).collect();
+        cells_here.sort_by_key(|(k, _)| **k);
+        let rect = |r: u32, c: u32| -> (f64, f64, f64, f64) {
+            let (r2, c2) = match merged_at(r, c) {
+                Some((mr1, mc1, mr2, mc2)) if mr1 == r && mc1 == c => (mr2.min(*r1), mc2.min(*c1)),
+                _ => (r, c),
+            };
+            let x = x_of(c);
+            let w = x_of(c2 + 1) - x;
+            let top = y_of(r);
+            let h = top - y_of(r2 + 1);
+            (x, top - h, w, h)
+        };
+        let covered = |r: u32, c: u32| merged_at(r, c).is_some_and(|(mr1, mc1, _, _)| (mr1, mc1) != (r, c));
+        for ((r, c), cell) in &cells_here {
+            if covered(*r, *c) {
                 continue;
             }
-            // Only the merges that touch this page are searched for each of its cells.
-            let merges: Vec<(u32, u32, u32, u32)> =
-                sh.merges.iter().copied().filter(|(mr1, mc1, mr2, mc2)| *mr1 <= *r1 && *mr2 >= *r0 && *mc1 <= *c1 && *mc2 >= *c0).collect();
-            let merged_at = |r: u32, c: u32| merges.iter().find(|(r1, c1, r2, c2)| (*r1..=*r2).contains(&r) && (*c1..=*c2).contains(&c)).copied();
-            let pi = canvas.new_page(pw, ph)?;
-            let Some(page) = canvas.page(pi) else { continue };
-            // Scale about the printable area's top-left corner.
-            page.save();
-            if (k - 1.0).abs() > 1e-6 {
-                page.raw(&format!(
-                    "{} 0 0 {} {} {} cm\n",
-                    super::canvas::n(k),
-                    super::canvas::n(k),
-                    super::canvas::n(ml * (1.0 - k)),
-                    super::canvas::n((ph - mt) * (1.0 - k))
-                ));
+            let Some(xf) = styles.xfs.get(cell.xf) else { continue };
+            if let Some(Some(f)) = styles.fills.get(xf.fill) {
+                let (x, y, w, h) = rect(*r, *c);
+                page.fill_rect(x, y, w, h, *f);
             }
-            let x_of = |c: u32| ml + (*c0..c).map(width).sum::<f64>();
-            let y_of = |r: u32| ph - mt - (*r0..r).map(row_h).sum::<f64>();
-            if sh.gridlines {
-                let (xa, xb) = (x_of(*c0), x_of(c1 + 1));
-                let (ya, yb) = (y_of(*r0), y_of(r1 + 1));
-                for c in *c0..=c1 + 1 {
-                    page.line(x_of(c), ya, x_of(c), yb, 0.25, [0.75; 3]);
-                }
-                for r in *r0..=r1 + 1 {
-                    page.line(xa, y_of(r), xb, y_of(r), 0.25, [0.75; 3]);
-                }
+        }
+        for ((r, c), cell) in &cells_here {
+            if covered(*r, *c) || cell.text.is_empty() {
+                continue;
             }
-            // Fills first, then text, then borders on top.
-            let mut cells_here: Vec<(&(u32, u32), &Cell)> =
-                sh.cells.range((*r0, 0)..=(*r1, u32::MAX)).filter(|((_, c), _)| (*c0..=*c1).contains(c)).collect();
-            cells_here.sort_by_key(|(k, _)| **k);
-            let rect = |r: u32, c: u32| -> (f64, f64, f64, f64) {
-                let (r2, c2) = match merged_at(r, c) {
-                    Some((mr1, mc1, mr2, mc2)) if mr1 == r && mc1 == c => (mr2.min(*r1), mc2.min(*c1)),
-                    _ => (r, c),
-                };
-                let x = x_of(c);
-                let w = x_of(c2 + 1) - x;
-                let top = y_of(r);
-                let h = top - y_of(r2 + 1);
-                (x, top - h, w, h)
+            let xf = styles.xfs.get(cell.xf).cloned().unwrap_or_default();
+            let style = style_of(cell);
+            let (x, y, w, h) = rect(*r, *c);
+            if w <= 0.0 || h <= 0.0 {
+                continue;
+            }
+            let text = texts.get(&(*r, *c)).cloned().unwrap_or_default();
+            let lines = wrapped.get(&(*r, *c)).cloned().unwrap_or_else(|| vec![text.replace('\n', " ")]);
+            let line_h = style.size * 1.2;
+            let block = lines.len() as f64 * line_h;
+            let base_top = match xf.v_align.as_deref() {
+                Some("top") => y + h - 1.0,
+                Some("center") => y + h / 2.0 + block / 2.0,
+                _ => y + block + 1.0,
             };
-            let covered = |r: u32, c: u32| merged_at(r, c).is_some_and(|(mr1, mc1, _, _)| (mr1, mc1) != (r, c));
-            for ((r, c), cell) in &cells_here {
-                if covered(*r, *c) {
-                    continue;
+            let align = xf.h_align.clone().unwrap_or_else(|| {
+                if cell.numeric {
+                    "right".into()
+                } else if cell.boolean {
+                    "center".into()
+                } else {
+                    "left".into()
                 }
-                let Some(xf) = styles.xfs.get(cell.xf) else { continue };
-                if let Some(Some(f)) = styles.fills.get(xf.fill) {
-                    let (x, y, w, h) = rect(*r, *c);
-                    page.fill_rect(x, y, w, h, *f);
+            });
+            // Text may run into empty neighbours unless it wraps or is a number, as in Excel.
+            let mut clip_w = w;
+            if !xf.wrap && !cell.numeric && align == "left" {
+                let tw = lines.first().map_or(0.0, |l| style.width(l));
+                let mut cc = c + 1;
+                while clip_w < tw + 4.0 && cc <= *c1 && sh.cells.get(&(*r, cc)).is_none_or(|n| n.text.is_empty()) && !covered(*r, cc) {
+                    clip_w += width(cc);
+                    cc += 1;
                 }
             }
-            for ((r, c), cell) in &cells_here {
-                if covered(*r, *c) || cell.text.is_empty() {
-                    continue;
-                }
-                let xf = styles.xfs.get(cell.xf).cloned().unwrap_or_default();
-                let style = style_of(cell);
-                let (x, y, w, h) = rect(*r, *c);
-                if w <= 0.0 || h <= 0.0 {
-                    continue;
-                }
-                let text = texts.get(&(*r, *c)).cloned().unwrap_or_default();
-                let lines = wrapped.get(&(*r, *c)).cloned().unwrap_or_else(|| vec![text.replace('\n', " ")]);
-                let line_h = style.size * 1.2;
-                let block = lines.len() as f64 * line_h;
-                let base_top = match xf.v_align.as_deref() {
-                    Some("top") => y + h - 1.0,
-                    Some("center") => y + h / 2.0 + block / 2.0,
-                    _ => y + block + 1.0,
+            page.save();
+            page.clip_rect(x, y, clip_w, h);
+            for (i, l) in lines.iter().enumerate() {
+                let tw = style.width(l);
+                let indent = xf.indent * 9.0;
+                let lx = match align.as_str() {
+                    "right" => x + w - 2.0 - tw - indent,
+                    "center" | "centerContinuous" => x + (w - tw) / 2.0,
+                    _ => x + 2.0 + indent,
                 };
-                let align = xf.h_align.clone().unwrap_or_else(|| {
-                    if cell.numeric {
-                        "right".into()
-                    } else if cell.boolean {
-                        "center".into()
-                    } else {
-                        "left".into()
-                    }
-                });
-                // Text may run into empty neighbours unless it wraps or is a number, as in Excel.
-                let mut clip_w = w;
-                if !xf.wrap && !cell.numeric && align == "left" {
-                    let tw = lines.first().map_or(0.0, |l| style.width(l));
-                    let mut cc = c + 1;
-                    while clip_w < tw + 4.0 && cc <= *c1 && sh.cells.get(&(*r, cc)).is_none_or(|n| n.text.is_empty()) && !covered(*r, cc) {
-                        clip_w += width(cc);
-                        cc += 1;
-                    }
-                }
-                page.save();
-                page.clip_rect(x, y, clip_w, h);
-                for (i, l) in lines.iter().enumerate() {
-                    let tw = style.width(l);
-                    let indent = xf.indent * 9.0;
-                    let lx = match align.as_str() {
-                        "right" => x + w - 2.0 - tw - indent,
-                        "center" | "centerContinuous" => x + (w - tw) / 2.0,
-                        _ => x + 2.0 + indent,
-                    };
-                    let ly = base_top - (i as f64 + 1.0) * line_h + style.size * 0.25;
-                    if numeric_overflow(cell, tw, w) {
-                        // Excel shows ### when a number doesn't fit its column.
-                        let hashes = "#".repeat(((w - 4.0) / style.width("#")).floor().clamp(1.0, 255.0) as usize);
-                        page.text(x + 2.0, ly, &style, &hashes);
-                    } else {
-                        page.text(lx, ly, &style, l);
-                    }
-                }
-                page.restore();
-            }
-            for ((r, c), cell) in &cells_here {
-                if covered(*r, *c) {
-                    continue;
-                }
-                let Some(xf) = styles.xfs.get(cell.xf) else { continue };
-                let Some(b) = styles.borders.get(xf.border) else { continue };
-                let (x, y, w, h) = rect(*r, *c);
-                if let Some(e) = b.top {
-                    page.line(x, y + h, x + w, y + h, e.width, e.color);
-                }
-                if let Some(e) = b.bottom {
-                    page.line(x, y, x + w, y, e.width, e.color);
-                }
-                if let Some(e) = b.left {
-                    page.line(x, y, x, y + h, e.width, e.color);
-                }
-                if let Some(e) = b.right {
-                    page.line(x + w, y, x + w, y + h, e.width, e.color);
+                let ly = base_top - (i as f64 + 1.0) * line_h + style.size * 0.25;
+                if numeric_overflow(cell, tw, w) {
+                    // Excel shows ### when a number doesn't fit its column.
+                    let hashes = "#".repeat(((w - 4.0) / style.width("#")).floor().clamp(1.0, 255.0) as usize);
+                    page.text(x + 2.0, ly, &style, &hashes);
+                } else {
+                    page.text(lx, ly, &style, l);
                 }
             }
             page.restore();
         }
+        for ((r, c), cell) in &cells_here {
+            if covered(*r, *c) {
+                continue;
+            }
+            let Some(xf) = styles.xfs.get(cell.xf) else { continue };
+            let Some(b) = styles.borders.get(xf.border) else { continue };
+            let (x, y, w, h) = rect(*r, *c);
+            if let Some(e) = b.top {
+                page.line(x, y + h, x + w, y + h, e.width, e.color);
+            }
+            if let Some(e) = b.bottom {
+                page.line(x, y, x + w, y, e.width, e.color);
+            }
+            if let Some(e) = b.left {
+                page.line(x, y, x, y + h, e.width, e.color);
+            }
+            if let Some(e) = b.right {
+                page.line(x + w, y, x + w, y + h, e.width, e.color);
+            }
+        }
+        page.restore();
     }
     Ok(())
 }
