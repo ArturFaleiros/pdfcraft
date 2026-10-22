@@ -35,8 +35,6 @@ fn components(doc: &Document, s: &Stream) -> Option<usize> {
     })
 }
 
-/// `Ok(Some(copy))` with the covered pixels cleared, `Ok(None)` when no pixel intersects,
-/// `Err(())` when the image can't be cleared (the caller removes it).
 /// The image dictionary entries a cleared copy keeps (ISO 32000-2 §8.9.5): its samples' layout
 /// and how to paint them, its optional-content membership and its place in the structure tree.
 const KEPT_KEYS: [&[u8]; 13] = [
@@ -55,6 +53,8 @@ const KEPT_KEYS: [&[u8]; 13] = [
     b"Name",
 ];
 
+/// `Ok(Some(copy))` with the covered pixels cleared, `Ok(None)` when no pixel intersects,
+/// `Err(())` when the image can't be cleared (the caller removes it).
 #[allow(clippy::result_unit_err)]
 pub(crate) fn clear(doc: &Document, s: &Stream, ctm: &Matrix, rects: &[[f64; 4]]) -> Result<Option<Stream>, ()> {
     decode_and_clear(doc, s, ctm, rects).ok_or(())
