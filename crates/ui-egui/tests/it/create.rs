@@ -1,0 +1,480 @@
+//! Create a PDF and Reduce File Size in the real shell.
+
+use pdfcraft_ui_egui::PdfCraftApp;
+
+fn png() -> Vec<u8> {
+    let mut out = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut out, 8, 4);
+        enc.set_color(png::ColorType::Rgb);
+        enc.set_depth(png::BitDepth::Eight);
+        let mut w = enc.write_header().unwrap();
+        w.write_image_data(&[120u8; 8 * 4 * 3]).unwrap();
+    }
+    out
+}
+
+#[test]
+fn image_import_dialog_chooses_dpi_and_cancels() {
+    use egui_kittest::{Harness, kittest::Queryable};
+    let mut h = Harness::builder().with_size(egui::vec2(1200.0, 800.0)).build_eframe(|_cc| {
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "en").unwrap();
+        app.begin_image_import(vec![("scan.png".into(), png())]);
+        app
+    });
+    h.run_steps(3);
+    if let Ok(path) = std::env::var("PDFCRAFT_IMAGE_IMPORT_SHOT") {
+        let _gpu = crate::gpu();
+        h.render().unwrap().save(path).unwrap();
+    }
+    h.get_by_label("Use 72 DPI (one point per pixel)").click();
+    h.run_steps(1);
+    h.get_by_label("Create").click();
+    h.run_steps(3);
+    assert!(h.state().image_import.is_none());
+    let page = &h.state().session.docs()[0].info.pages[0];
+    assert_eq!((page.width, page.height), (8.0, 4.0));
+    h.state_mut().begin_image_import(vec![("scan.png".into(), png())]);
+    h.state_mut().image_import.as_mut().unwrap().dpi = 144.0;
+    h.run_steps(2);
+    h.get_by_label("Use custom DPI").click();
+    h.run_steps(1);
+    h.get_by_label("Create").click();
+    h.run_steps(3);
+    let page = &h.state().session.docs()[1].info.pages[0];
+    assert_eq!((page.width, page.height), (4.0, 2.0));
+    h.state_mut().begin_image_import(vec![("scan.png".into(), png())]);
+    h.run_steps(2);
+    h.get_by_label("Cancel").click();
+    h.run_steps(2);
+    assert!(h.state().image_import.is_none());
+    assert_eq!(h.state().session.docs().len(), 2);
+}
+
+#[test]
+fn opening_images_and_text_converts_them_to_new_pdfs() {
+    let mut app = PdfCraftApp::new();
+    app.set_option("language", "en").unwrap();
+    app.open_bytes("photo.png", Some("/tmp/photo.png".into()), png()).unwrap();
+    app.open_bytes("notes.txt", None, b"first line\nsecond line".to_vec()).unwrap();
+    app.create_from_images(vec![("a.png".into(), png()), ("b.png".into(), png())]);
+    assert!(app.execute("create.blank"));
+    let docs = app.session.docs();
+    let summary: Vec<(String, usize, bool)> = docs.iter().map(|d| (d.name.clone(), d.info.pages.len(), d.dirty)).collect();
+    assert_eq!(
+        summary,
+        [("photo.pdf".to_string(), 1, true), ("notes.pdf".into(), 1, true), ("Images.pdf".into(), 2, true), ("Untitled.pdf".into(), 1, true)]
+    );
+    assert!(docs[0].path.is_none(), "a converted file has no PDF path yet: Save asks where");
+    assert!(app.open_bytes("junk.png", None, b"\x89PNG\r\n\x1a\nnot really".to_vec()).is_err());
+}
+
+struct ReduceDir(std::path::PathBuf);
+impl ReduceDir {
+    fn new() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        for _ in 0..128 {
+            let path = std::env::temp_dir().join(format!("pdfcraft-reduce-test-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+            match std::fs::create_dir(&path) {
+                Ok(()) => return Self(path),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("creating Reduce test directory: {error}"),
+            }
+        }
+        panic!("no unused Reduce test directory after 128 attempts");
+    }
+}
+impl Drop for ReduceDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Open `name` and run Reduce File Size on it, saving to `out` without a dialog.
+fn reduce(name: &'static str, bytes: Vec<u8>, out: &std::path::Path) -> egui_kittest::Harness<'static, PdfCraftApp> {
+    let out2 = out.to_path_buf();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1200.0, 800.0)).build_eframe(move |_cc| {
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "en").unwrap();
+        // Keep metadata identical: changing ModDate can make a compact PDF one byte smaller.
+        app.session = std::mem::take(&mut app.session).with_clock(|| 1_700_000_000);
+        app.open_bytes(name, None, bytes).unwrap();
+        app.save_override = Some(out2.to_string_lossy().into_owned());
+        app
+    });
+    h.run_steps(2);
+    assert!(h.state_mut().execute("optimize.reduce"));
+    // It runs on a worker thread like the PDF Optimizer, with the progress card meanwhile.
+    let start = std::time::Instant::now();
+    while h.state().optimize_run.is_some() && start.elapsed() < std::time::Duration::from_secs(30) {
+        h.run_steps(1);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    h.run_steps(2);
+    assert!(h.state().optimize_run.is_none() && h.state().progress_notice.is_none(), "the run finished");
+    h
+}
+
+#[test]
+fn reduce_file_size_writes_a_compact_copy() {
+    use egui_kittest::kittest::Queryable;
+    // A photo-like picture, stored losslessly: Reduce recompresses it as JPEG.
+    let (w, h) = (600u32, 400u32);
+    let px: Vec<u8> = (0..w * h).flat_map(|i| [(i % w * 255 / w) as u8 ^ (i & 7) as u8, (i / w * 255 / h) as u8, 128]).collect();
+    let mut photo = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut photo, w, h);
+        enc.set_color(png::ColorType::Rgb);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.write_header().unwrap().write_image_data(&px).unwrap();
+    }
+    let dir = ReduceDir::new();
+    let out = dir.0.join("reduced.pdf");
+    let h = reduce("photo.png", photo, &out);
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"%PDF-"));
+    assert!(bytes.len() < h.state().session.docs()[0].bytes.len(), "the copy is smaller");
+    assert!(h.state().session.docs()[0].dirty, "the open document is unchanged");
+    h.get_by_label_contains("% smaller");
+}
+
+#[test]
+fn reduce_file_size_saves_nothing_when_the_file_is_already_small() {
+    use egui_kittest::kittest::Queryable;
+    let dir = ReduceDir::new();
+    let out = dir.0.join("reduced.pdf");
+    // A new text PDF is already compact: a copy would be no smaller (#490).
+    let h = reduce("notes.txt", "lorem ipsum ".repeat(500).into_bytes(), &out);
+    assert!(!out.exists(), "no copy was written");
+    h.get_by_label_contains("This file is already as small as it can be made");
+}
+
+#[test]
+fn clipboard_images_and_text_become_new_pdfs() {
+    use pdfcraft_ui_egui::Clip;
+    let mut app = PdfCraftApp::new();
+    app.set_option("language", "en").unwrap();
+    app.create_from_clip(Clip::Image { width: 40, height: 20, rgba: [10u8, 20, 30, 255].repeat(40 * 20) }).unwrap();
+    app.create_from_clip(Clip::Text("Pasted\nlines".into())).unwrap();
+    let docs = app.session.docs();
+    assert_eq!(docs.len(), 2);
+    assert_eq!(docs[0].name, "Clipboard.pdf");
+    // The image page takes the image's size (one pixel per point at 72 dpi).
+    let p = &docs[0].info.pages[0];
+    assert!((p.width / p.height - 2.0).abs() < 0.01, "{} × {}", p.width, p.height);
+    assert!(app.create_from_clip(Clip::Image { width: 4, height: 4, rgba: vec![0; 3] }).is_err(), "malformed images are refused");
+}
+
+#[test]
+fn the_pdf_optimizer_dialog_saves_an_optimized_copy() {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+    let dir = std::env::temp_dir().join(format!("pdfcraft-optimizer-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = dir.join("optimized.pdf");
+    let out2 = out.clone();
+    let mut h = Harness::builder().with_size(egui::vec2(1200.0, 800.0)).build_eframe(move |_cc| {
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "en").unwrap();
+        app.open_bytes("notes.txt", None, "lorem ipsum ".repeat(500).into_bytes()).unwrap();
+        app.save_override = Some(out2.to_string_lossy().into_owned());
+        app
+    });
+    h.run_steps(4);
+    assert!(h.state_mut().execute("optimize.advanced"));
+    h.run_steps(2);
+    h.get_by_label("PDF Optimizer");
+    h.get_by_label("Color Images");
+    h.get_by_label("Discard Objects").click();
+    h.run_steps(2);
+    h.get_by_label("Discard document tags").click();
+    h.get_by_label("Discard User Data").click();
+    h.run_steps(2);
+    h.get_by_label("Discard document information and metadata").click();
+    h.run_steps(1);
+    {
+        let d = &h.state().optimize_draft;
+        assert!(d.settings.discard_tags && d.discard == vec![pdfcraft_engine::Hidden::Metadata]);
+    }
+    h.get_by_label("OK").click();
+    // The click is handled next frame. The optimization then runs on a worker thread and the
+    // copy is saved when it is done.
+    h.run_steps(1);
+    let start = std::time::Instant::now();
+    while (h.state().optimize_run.is_some() || !out.exists()) && start.elapsed() < std::time::Duration::from_secs(30) {
+        h.run_steps(1);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    h.run_steps(2);
+    assert!(h.state().progress_notice.is_none(), "the progress card is gone");
+    assert!(std::fs::read(&out).unwrap().starts_with(b"%PDF-"));
+    assert_eq!(h.state().dialog, None);
+}
+
+#[test]
+fn the_pdf_optimizer_dialog_picks_a_preset() {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+    use pdfcraft_engine::optimize::Preset;
+    let mut h = Harness::builder().with_size(egui::vec2(1200.0, 800.0)).build_eframe(|_cc| {
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "en").unwrap();
+        app.open_bytes("notes.txt", None, b"lorem ipsum".to_vec()).unwrap();
+        app
+    });
+    h.run_steps(4);
+    assert!(h.state_mut().execute("optimize.advanced"));
+    h.run_steps(2);
+    assert_eq!(Preset::of(&h.state().optimize_draft.settings), Some(Preset::Standard));
+    h.get_by_label("Merge image fragments");
+    h.get_by_value("Standard").click();
+    h.run_steps(4);
+    h.get_by_label("Mobile").click();
+    h.run_steps(2);
+    assert_eq!(h.state().optimize_draft.settings, Preset::Mobile.settings(), "Mobile chosen");
+    // Changing an option makes the settings custom.
+    h.get_by_label("Merge image fragments").click();
+    h.run_steps(2);
+    assert!(!h.state().optimize_draft.settings.merge_fragments);
+    h.get_by_value("Custom");
+}
+
+fn mixed_files(app: &PdfCraftApp) -> Vec<(String, Vec<u8>)> {
+    let pdf = app.session.create_from_text("a", "from a pdf").unwrap();
+    vec![
+        ("notes.txt".into(), b"from text".to_vec()),
+        ("report.docx".into(), b"PK\x03\x04".to_vec()),
+        ("a.pdf".into(), pdf.to_vec()),
+        ("photo.png".into(), png()),
+    ]
+}
+
+#[test]
+fn separate_batch_creates_one_pdf_per_source_without_replacing_existing_files() {
+    use pdfcraft_ui_egui::FilePurpose;
+    let dir = std::env::temp_dir().join(format!("pdfcraft-separate-batch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("notes.pdf"), b"keep this file").unwrap();
+
+    let mut app = PdfCraftApp::new();
+    app.set_option("language", "en").unwrap();
+    app.export_dir_override = Some(dir.to_string_lossy().into_owned());
+    let mut files = mixed_files(&app);
+    files.push(("notes.txt".into(), b"another text file".to_vec()));
+    app.use_files(FilePurpose::CreateMultipleSeparate, files);
+
+    assert_eq!(std::fs::read(dir.join("notes.pdf")).unwrap(), b"keep this file");
+    for name in ["notes (2).pdf", "notes (3).pdf", "photo.pdf"] {
+        assert!(std::fs::read(dir.join(name)).unwrap().starts_with(b"%PDF-"), "{name}");
+    }
+    assert!(!dir.join("a (2).pdf").exists(), "an already-PDF input is skipped");
+    assert!(!dir.join("report.pdf").exists(), "an invalid Office file is skipped");
+    assert!(app.views.is_empty(), "batch conversion must not open PDF tabs");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn separate_batch_command_picks_files_and_writes_to_the_chosen_folder() {
+    use egui_kittest::Harness;
+    let dir = std::env::temp_dir().join(format!("pdfcraft-separate-command-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("letter.txt");
+    std::fs::write(&source, b"A separate PDF").unwrap();
+    let mut h = Harness::builder().with_size(egui::vec2(1000.0, 720.0)).build_eframe(|_cc| {
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "en").unwrap();
+        app.pick_override = Some(vec![source.to_string_lossy().into_owned()]);
+        app.export_dir_override = Some(dir.to_string_lossy().into_owned());
+        app
+    });
+    assert!(h.state_mut().execute("create.multiple_separate"));
+    h.run_steps(2);
+    assert!(std::fs::read(dir.join("letter.pdf")).unwrap().starts_with(b"%PDF-"));
+    assert!(h.state().views.is_empty());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn multiple_files_open_as_one_document_in_the_page_grid() {
+    use egui_kittest::{Harness, kittest::Queryable};
+    let path = std::env::temp_dir().join(format!("pdfcraft-create-multiple-{}.pdf", std::process::id()));
+    let mut h = Harness::builder().with_size(egui::vec2(1000.0, 720.0)).build_eframe(|_cc| {
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "en").unwrap();
+        let files = mixed_files(&app);
+        app.use_files(pdfcraft_ui_egui::FilePurpose::CreateMultiple, files);
+        app
+    });
+    h.run_steps(4);
+    {
+        let app = h.state();
+        assert_eq!(app.views.len(), 1);
+        assert!(app.views[0].organize, "the pages are shown as a grid");
+        let doc = app.session.get(app.views[0].id).unwrap();
+        assert_eq!(doc.name, "Combined.pdf");
+        assert!(doc.dirty && doc.path.is_none(), "unsaved until the user saves it");
+        assert_eq!(doc.info.pages.len(), 3, "the Word file can't be converted and is left out");
+        assert_eq!(doc.info.outline.iter().map(|o| o.title.as_str()).collect::<Vec<_>>(), ["notes", "a", "photo"]);
+    }
+    h.get_by_label_contains("left out: report.docx");
+    h.get_by_label("Insert a file before page 2");
+    if let Ok(path) = std::env::var("PDFCRAFT_CREATE_MULTIPLE_SHOT") {
+        let _gpu = crate::gpu();
+        h.run_steps(20);
+        h.render().unwrap().save(path).unwrap();
+    }
+    // Remove the middle page and save what is left.
+    h.get_by_label("Page 2").click();
+    h.run_steps(2);
+    h.get_by_label("Delete pages (Delete)").click();
+    h.run_steps(3);
+    h.state_mut().save_override = Some(path.to_string_lossy().into_owned());
+    h.get_by_label("Save pages").click();
+    h.run_steps(4);
+    let app = h.state();
+    let doc = app.session.get(app.views[0].id).unwrap();
+    assert!(!doc.dirty && doc.info.pages.len() == 2);
+    assert!(std::fs::read(&path).unwrap().starts_with(b"%PDF-"));
+}
+
+#[test]
+fn multiple_files_that_cannot_be_converted_open_nothing() {
+    let mut app = PdfCraftApp::new();
+    app.set_option("language", "en").unwrap();
+    app.use_files(pdfcraft_ui_egui::FilePurpose::CreateMultiple, vec![("report.docx".into(), b"PK\x03\x04".to_vec())]);
+    assert!(app.views.is_empty());
+    assert!(app.toast.is_some());
+}
+
+#[test]
+fn multiple_files_past_a_thousand_are_all_used() {
+    let mut app = PdfCraftApp::new();
+    app.set_option("language", "en").unwrap();
+    let pdf = app.session.create_from_text("a", "from a pdf").unwrap();
+    let files: Vec<(String, Vec<u8>)> = (0..1001).map(|i| (format!("f{i}.pdf"), pdf.to_vec())).collect();
+    app.use_files(pdfcraft_ui_egui::FilePurpose::CreateMultiple, files);
+    assert_eq!(app.views.len(), 1);
+    let doc = app.session.get(app.views[0].id).unwrap();
+    assert_eq!(doc.info.pages.len(), 1001, "every picked file is used, in order");
+}
+
+/// #2871: all three user-facing entry points share native DOCX conversion.
+#[test]
+fn docx_opens_inserts_and_combines_as_pdf_pages() {
+    use pdfcraft_engine::{Session, compare::OfficeFormat};
+    use pdfcraft_ui_egui::FilePurpose;
+    let mut source = Session::new();
+    let pdf = source.create_from_text("Report", "Native DOCX import").unwrap();
+    let id = source.open_new("report.pdf", pdf.clone()).unwrap();
+    let docx = source.get(id).unwrap().export_office(OfficeFormat::Docx);
+    let mut app = PdfCraftApp::new();
+    app.set_option("language", "en").unwrap();
+    app.open_bytes("Report.DOCX", Some("/tmp/Report.DOCX".into()), docx.clone()).unwrap();
+    let id = app.views[0].id;
+    let converted = app.session.get(id).unwrap();
+    assert_eq!(converted.name, "Report.pdf");
+    assert!(converted.path.is_none() && converted.dirty);
+    assert_eq!(converted.info.pages.len(), 1);
+    app.insert_pages_from("report.docx", docx.clone());
+    assert_eq!(app.session.get(id).unwrap().info.pages.len(), 2);
+    app.session.undo(id).unwrap();
+    assert_eq!(app.session.get(id).unwrap().info.pages.len(), 1);
+    app.session.redo(id).unwrap();
+    assert_eq!(app.session.get(id).unwrap().info.pages.len(), 2);
+    let before = app.session.docs().len();
+    assert!(app.open_bytes("broken.docx", None, b"PK\x03\x04".to_vec()).is_err());
+    assert_eq!(app.session.docs().len(), before);
+    app.open_combine_tab();
+    app.use_files(FilePurpose::Combine, vec![("report.docx".into(), docx), ("existing.pdf".into(), pdf.to_vec())]);
+    assert_eq!(app.combine_draft.len(), 2);
+    assert_eq!(app.combine_draft[0].pages, 1);
+    assert!(app.combine_draft[0].problem.is_none());
+    assert!(app.combine_draft[0].notes.is_empty(), "an exact conversion adds no warning: {:?}", app.combine_draft[0].notes);
+    let before_combine = app.session.docs().len();
+    app.combine_staged();
+    assert_eq!(app.session.docs().len(), before_combine + 1, "Combine opens a new document");
+    assert_eq!(app.session.docs().last().unwrap().name, "Combined.pdf");
+    assert_eq!(app.session.docs().last().unwrap().info.pages.len(), 2);
+    if let Ok(path) = std::env::var("PDFCRAFT_DOCX_IMPORT_SHOT") {
+        let _gpu = crate::gpu();
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1200.0, 800.0)).build_eframe(move |_cc| app);
+        h.run_steps(8);
+        let start = std::time::Instant::now();
+        while h.state().render_pending() && start.elapsed() < std::time::Duration::from_secs(20) {
+            h.run_steps(2);
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        h.run_steps(3);
+        assert!(!h.state().render_pending(), "the screenshot must show the converted pages");
+        h.render().unwrap().save(path).unwrap();
+    }
+}
+
+/// A Word package written uncompressed (the importer doesn't check CRCs), with an equation: the
+/// importer writes equations as plain text and says so in its report.
+fn docx_with_equation() -> Vec<u8> {
+    const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    const M: &str = "http://schemas.openxmlformats.org/officeDocument/2006/math";
+    const REL: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
+    let document = format!(
+        r#"<w:document xmlns:w="{W}" xmlns:m="{M}"><w:body><w:p><w:r><w:t>Area</w:t></w:r><m:oMath><m:r><m:t>a=b+c</m:t></m:r></m:oMath></w:p></w:body></w:document>"#
+    );
+    let rels = format!(
+        r#"<Relationships xmlns="{REL}"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#
+    );
+    let parts = [("[Content_Types].xml", "<Types/>".to_string()), ("_rels/.rels", rels), ("word/document.xml", document)];
+    let (mut out, mut central) = (Vec::new(), Vec::new());
+    for (name, data) in &parts {
+        let offset = out.len() as u32;
+        let sizes = [(data.len() as u32).to_le_bytes(), (data.len() as u32).to_le_bytes()].concat();
+        out.extend_from_slice(b"PK\x03\x04\x14\0\0\0\0\0");
+        out.extend_from_slice(&[0; 8]);
+        out.extend_from_slice(&sizes);
+        out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        out.extend_from_slice(&[0, 0]);
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(data.as_bytes());
+        central.extend_from_slice(b"PK\x01\x02\x14\0\x14\0\0\0\0\0");
+        central.extend_from_slice(&[0; 8]);
+        central.extend_from_slice(&sizes);
+        central.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        central.extend_from_slice(&[0; 12]);
+        central.extend_from_slice(&offset.to_le_bytes());
+        central.extend_from_slice(name.as_bytes());
+    }
+    let start = out.len() as u32;
+    out.extend_from_slice(&central);
+    out.extend_from_slice(b"PK\x05\x06\0\0\0\0");
+    out.extend_from_slice(&[parts.len() as u8, 0, parts.len() as u8, 0]);
+    out.extend_from_slice(&(central.len() as u32).to_le_bytes());
+    out.extend_from_slice(&start.to_le_bytes());
+    out.extend_from_slice(&[0, 0]);
+    out
+}
+
+/// Create PDF from multiple files says what an Office conversion approximated, in both modes,
+/// as opening, inserting and combining one do.
+#[test]
+fn create_from_multiple_files_reports_office_approximations() {
+    use pdfcraft_ui_egui::FilePurpose;
+    let docx = docx_with_equation();
+    let mut app = PdfCraftApp::new();
+    app.set_option("language", "en").unwrap();
+    app.use_files(FilePurpose::CreateMultiple, vec![("formula.docx".into(), docx.clone()), ("scan.png".into(), png())]);
+    let toast = app.toast.as_ref().map(|(t, _)| t.clone()).unwrap_or_default();
+    assert!(toast.starts_with("Created a PDF from 2 files"), "{toast}");
+    assert!(toast.contains("Converted formula.docx. Approximated: equations, written as plain text: 1"), "{toast}");
+    let dir = std::env::temp_dir().join(format!("pdfcraft-create-separate-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    app.export_dir_override = Some(dir.to_string_lossy().into_owned());
+    app.use_files(FilePurpose::CreateMultipleSeparate, vec![("formula.docx".into(), docx)]);
+    let toast = app.toast.as_ref().map(|(t, _)| t.clone()).unwrap_or_default();
+    assert!(toast.starts_with("Wrote 1 files to") && toast.contains("Converted formula.docx. Approximated: equations"), "{toast}");
+    assert!(dir.join("formula.pdf").exists());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
