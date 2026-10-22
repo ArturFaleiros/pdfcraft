@@ -5,6 +5,7 @@
 use pdfcraft_cos::{Dict, Document, ObjRef, Object, PdfString, Stream};
 
 mod extract;
+mod upright_image;
 pub use extract::{ExtractedImage, ImageExport, extract_images, image_file};
 mod office;
 pub use office::{OFFICE_EXTENSIONS, OfficeKind, OfficeReport, from_office};
@@ -541,7 +542,7 @@ pub fn source_kind(name: &str, bytes: &[u8]) -> Option<SourceKind> {
 /// Detect the image format from its bytes; a TIFF may hold several pages.
 fn embed(name: &str, bytes: &[u8]) -> Result<Vec<Embedded>, CreateError> {
     if bytes.starts_with(&[0xFF, 0xD8]) {
-        Ok(vec![jpeg(name, bytes)?])
+        Ok(vec![jpeg(name, &upright_image::upright(bytes))?])
     } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         Ok(vec![png_image(name, bytes)?])
     } else if is_tiff(bytes) {
