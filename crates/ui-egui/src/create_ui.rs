@@ -99,7 +99,9 @@ impl PdfCraftApp {
             return Some((|| {
                 let (pdf, report) = self.session.create_from_office(name, bytes).map_err(|e| e.to_string())?;
                 self.open_created_bytes(&format!("{}.pdf", stem(name)), Ok(pdf))?;
-                self.notify_error(report.notice());
+                if let Some(note) = crate::office_note(name, &report) {
+                    self.notify(note);
+                }
                 Ok(())
             })());
         }

@@ -583,7 +583,7 @@ impl PdfCraftApp {
             let converted = (|| {
                 let (pdf, notice) = if pdfcraft_engine::source_kind(&name, &bytes) == Some(pdfcraft_engine::SourceKind::Office) {
                     let (pdf, report) = self.session.create_from_office(&name, &bytes)?;
-                    (pdf, Some(report.notice()))
+                    (pdf, crate::office_note(&name, &report))
                 } else {
                     (self.session.convert_to_pdf(&name, &Arc::new(bytes))?.1, None)
                 };
@@ -600,7 +600,7 @@ impl PdfCraftApp {
                     }) {
                         at = at.saturating_add(pages);
                         if let Some(notice) = notice {
-                            self.notify_error(notice);
+                            self.notify(notice);
                         }
                     }
                 }

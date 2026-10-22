@@ -2425,8 +2425,12 @@ impl PdfCraftApp {
             let mut note = note;
             let converted = if pdfcraft_engine::source_kind(&name, &bytes) == Some(pdfcraft_engine::SourceKind::Office) {
                 self.session.create_from_office(&name, &bytes).map(|(pdf, report)| {
-                    let notice = report.notice();
-                    note = Some(note.as_ref().map_or_else(|| notice.clone(), |prior| format!("{prior}; {notice}")));
+                    if let Some(converted) = crate::office_note(&name, &report) {
+                        note = Some(match note.take() {
+                            Some(prior) => format!("{prior}; {converted}"),
+                            None => converted,
+                        });
+                    }
                     pdf
                 })
             } else {

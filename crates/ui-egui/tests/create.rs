@@ -391,7 +391,7 @@ fn docx_opens_inserts_and_combines_as_pdf_pages() {
     assert_eq!(app.combine_draft.len(), 2);
     assert_eq!(app.combine_draft[0].pages, 1);
     assert!(app.combine_draft[0].problem.is_none());
-    assert!(app.combine_draft[0].notes.iter().any(|n| n.contains("layout may differ")));
+    assert!(app.combine_draft[0].notes.is_empty(), "an exact conversion adds no warning: {:?}", app.combine_draft[0].notes);
     let before_combine = app.session.docs().len();
     app.combine_staged();
     assert_eq!(app.session.docs().len(), before_combine + 1, "Combine opens a new document");
