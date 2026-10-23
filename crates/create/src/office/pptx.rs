@@ -1366,7 +1366,8 @@ pub(crate) fn convert(zip: &Zip<'_>, main: &str, doc: &mut Document, notes: &mut
     // Layouts, masters and themes are shared by many slides: each is parsed once, here. Slides are
     // parsed one at a time in the loop, so only one is held at once.
     let mut shared: HashMap<&str, roxmltree::Document<'_>> = HashMap::new();
-    for part in plan.iter().flat_map(|(_, _, l, _, m, _, t)| [l, m, t]).flatten() {
+    // Only the visible slides' parts: a hidden slide is never drawn, so neither is its master.
+    for part in visible.iter().filter_map(|i| plan.get(*i)).flat_map(|(_, _, l, _, m, _, t)| [l, m, t]).flatten() {
         if !shared.contains_key(part.as_str())
             && let Some(d) = texts.get(part).and_then(|t| xml::parse(t).ok())
         {
