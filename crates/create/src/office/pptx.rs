@@ -424,11 +424,11 @@ impl<'a, 'i> Placeholders<'a, 'i> {
     }
 }
 
-struct Inherit<'a, 'i> {
+struct Inherit<'a, 'i, 'p> {
     layout: Option<Node<'a, 'i>>,
     master: Option<Node<'a, 'i>>,
-    layout_ph: Placeholders<'a, 'i>,
-    master_ph: Placeholders<'a, 'i>,
+    layout_ph: &'p Placeholders<'a, 'i>,
+    master_ph: &'p Placeholders<'a, 'i>,
     title: Levels,
     body: Levels,
     other: Levels,
@@ -771,7 +771,7 @@ fn text_body(
     sp: Node<'_, '_>,
     body: Node<'_, '_>,
     (x, y, w, h): (f64, f64, f64, f64),
-    inh: &Inherit<'_, '_>,
+    inh: &Inherit<'_, '_, '_>,
     c: &Colors,
     font_color: Option<[f64; 3]>,
 ) {
@@ -784,7 +784,7 @@ fn text_body(
     };
     let mut body_props: Vec<Node<'_, '_>> = Vec::new();
     if let Some((ty, idx)) = &ph {
-        for tree in [&inh.master_ph, &inh.layout_ph] {
+        for tree in [inh.master_ph, inh.layout_ph] {
             if let Some(m) = tree.find(ty, idx.as_deref()).and_then(|s| child(s, "txBody")) {
                 if let Some(ls) = child(m, "lstStyle") {
                     levels.merge(&Levels::parse(ls, c));
@@ -954,7 +954,7 @@ fn shapes(
     rels: &Rels,
     xf: Xf,
     sp: &Space,
-    inh: &Inherit<'_, '_>,
+    inh: &Inherit<'_, '_, '_>,
     c: &Colors,
     skip_ph: bool,
     depth: usize,
@@ -992,7 +992,7 @@ fn shapes(
         let own = sppr.and_then(|p| child(p, "xfrm")).or_else(|| child(e, "xfrm")).and_then(frame_of);
         let frame = own.or_else(|| {
             let (ty, idx) = ph.as_ref()?;
-            [&inh.layout_ph, &inh.master_ph]
+            [inh.layout_ph, inh.master_ph]
                 .into_iter()
                 .find_map(|t| t.find(ty, idx.as_deref()).and_then(|s| child(s, "spPr")).and_then(|p| child(p, "xfrm")).and_then(frame_of))
         });
@@ -1128,7 +1128,7 @@ fn shapes(
     }
 }
 
-fn table(cx: &mut Cx<'_, '_>, page: &mut Page, tbl: Node<'_, '_>, (x, ytop, w, _h): (f64, f64, f64, f64), inh: &Inherit<'_, '_>, c: &Colors) {
+fn table(cx: &mut Cx<'_, '_>, page: &mut Page, tbl: Node<'_, '_>, (x, ytop, w, _h): (f64, f64, f64, f64), inh: &Inherit<'_, '_, '_>, c: &Colors) {
     let cols: Vec<f64> = child(tbl, "tblGrid")
         .map(|g| children(g, "gridCol").map(|c| attr_f64(c, "w").map_or(0.0, |w| (w / EMU).max(0.0))).collect())
         .unwrap_or_default();
@@ -1217,7 +1217,7 @@ fn cell_text(
     cx: &mut Cx<'_, '_>,
     body: Node<'_, '_>,
     width: f64,
-    inh: &Inherit<'_, '_>,
+    inh: &Inherit<'_, '_, '_>,
     c: &Colors,
     color: Option<[f64; 3]>,
     bold: bool,
@@ -1363,14 +1363,28 @@ pub(crate) fn convert(zip: &Zip<'_>, main: &str, doc: &mut Document, notes: &mut
         })
         .map(|(i, _)| i)
         .collect();
+    // Layouts, masters and themes are shared by many slides: each is parsed once, here. Slides are
+    // parsed one at a time in the loop, so only one is held at once.
+    let mut shared: HashMap<&str, roxmltree::Document<'_>> = HashMap::new();
+    for part in plan.iter().flat_map(|(_, _, l, _, m, _, t)| [l, m, t]).flatten() {
+        if !shared.contains_key(part.as_str())
+            && let Some(d) = texts.get(part).and_then(|t| xml::parse(t).ok())
+        {
+            shared.insert(part.as_str(), d);
+        }
+    }
+    // And each one's placeholders indexed once (a slide looks them up for every shape).
+    let placeholders: HashMap<&str, Placeholders<'_, '_>> =
+        shared.iter().map(|(p, d)| (*p, Placeholders::of(xml::path(d.root_element(), &["cSld", "spTree"])))).collect();
+    let none = Placeholders::default();
     let mut cx = Cx { zip, doc, notes, images: HashMap::new(), slide_no: 0, slides: visible.len(), shapes: 0, deck_shapes: 0, cut: false };
     for (k, i) in visible.iter().enumerate() {
         let Some((part, srels, layout, lrels, master, mrels, theme)) = plan.get(*i) else { continue };
-        let parse = |p: &Option<String>| p.as_ref().and_then(|p| texts.get(p)).and_then(|t| xml::parse(t).ok());
+        let parsed = |p: &Option<String>| p.as_deref().and_then(|p| shared.get(p));
         let Some(slide) = texts.get(part).and_then(|t| xml::parse(t).ok()) else { continue };
-        let layout_doc = parse(layout);
-        let master_doc = parse(master);
-        let theme_doc = parse(theme);
+        let layout_doc = parsed(layout);
+        let master_doc = parsed(master);
+        let theme_doc = parsed(theme);
         let colors = Colors::load(theme_doc.as_ref().map(|d| d.root_element()), master_doc.as_ref().map(|d| d.root_element()));
         let tx = master_doc.as_ref().and_then(|d| child(d.root_element(), "txStyles"));
         let lv = |name: &str| tx.and_then(|t| child(t, name)).map(|n| Levels::parse(n, &colors)).unwrap_or_default();
@@ -1392,8 +1406,8 @@ pub(crate) fn convert(zip: &Zip<'_>, main: &str, doc: &mut Document, notes: &mut
         let inh = Inherit {
             layout: layout_tree,
             master: master_tree,
-            layout_ph: Placeholders::of(layout_tree),
-            master_ph: Placeholders::of(master_tree),
+            layout_ph: layout.as_deref().and_then(|p| placeholders.get(p)).unwrap_or(&none),
+            master_ph: master.as_deref().and_then(|p| placeholders.get(p)).unwrap_or(&none),
             title,
             body,
             other,

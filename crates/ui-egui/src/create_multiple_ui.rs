@@ -92,7 +92,12 @@ impl PdfCraftApp {
         if made > 0 {
             #[cfg(not(target_arch = "wasm32"))]
             if let Some(dir) = &dir {
-                notice.push(crate::i18n::fmt(tl!("Wrote {n} files to {dir}"), &[("n", &made.to_string()), ("dir", &dir.display().to_string())]));
+                let dir = dir.display().to_string();
+                notice.push(if made == 1 {
+                    crate::i18n::fmt(tl!("Wrote 1 file to {dir}"), &[("dir", &dir)])
+                } else {
+                    crate::i18n::fmt(tl!("Wrote {n} files to {dir}"), &[("n", &made.to_string()), ("dir", &dir)])
+                });
             }
             #[cfg(target_arch = "wasm32")]
             notice.push(crate::i18n::trn(crate::i18n::current(), made as u64, "Downloaded {n} PDF", "Downloaded {n} PDFs"));

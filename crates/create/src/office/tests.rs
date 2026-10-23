@@ -718,3 +718,29 @@ fn placeholder_lookups_over_a_large_master_are_quick() {
     let text = content(&doc, &pages(&doc)[0]);
     assert!(text.contains("(Titulo)") && text.contains(" 44 Tf"), "{text}");
 }
+
+/// A layout, master or theme shared by every slide is parsed and indexed once: 200 slides over a
+/// 100 000-shape master used to parse it 200 times.
+#[test]
+fn a_large_master_shared_by_many_slides_is_parsed_once() {
+    let sp = |id: usize| {
+        format!(
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="{id}" name="P"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="{id}"/></p:nvPr></p:nvSpPr><p:spPr/></p:sp>"#
+        )
+    };
+    let master = format!("<p:custDataLst>{}</p:custDataLst>", (100..100_100).map(sp).collect::<String>());
+    let slides: Vec<String> = (1..=200)
+        .map(|i| {
+            format!(
+                r#"<p:sp><p:nvSpPr><p:cNvPr id="2" name="T"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="3000000" cy="500000"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:t>Slide{i}</a:t></a:r></a:p></p:txBody></p:sp>"#
+            )
+        })
+        .collect();
+    let refs: Vec<&str> = slides.iter().map(String::as_str).collect();
+    let started = std::time::Instant::now();
+    let (doc, report) = from_office("deck.pptx", &pptx_with_master(&refs, &[], &master)).unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(20), "{:?}", started.elapsed());
+    assert_eq!(report.pages, 200, "{report:?}");
+    let doc = reopen(&doc);
+    assert!(content(&doc, &pages(&doc)[199]).contains("(Slide200)"));
+}
