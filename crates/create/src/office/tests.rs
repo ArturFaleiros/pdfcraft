@@ -654,3 +654,24 @@ fn an_oversized_number_format_is_shown_as_general_quickly() {
     let (_, report) = from_office("long.xlsx", &xlsx_styled(&sheet, &[], "", &"0".repeat(255))).unwrap();
     assert!(!report.notes.iter().any(|n| n.contains("longer than Excel allows")), "{report:?}");
 }
+
+/// Gridlines and cell positions are found from running totals: a page whose band holds 200 000
+/// hidden (zero-height) rows used to sum their heights again for every gridline, and drew a
+/// gridline for each of them at the same place.
+#[test]
+fn gridlines_over_many_hidden_rows_are_drawn_once_and_quickly() {
+    let hidden: String = (2..=200_000).map(|r| format!(r#"<row r="{r}" hidden="1"/>"#)).collect();
+    let sheet = format!(
+        r#"<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Topo</t></is></c></row>{hidden}<row r="200001"><c r="A200001" t="inlineStr"><is><t>Base</t></is></c></row></sheetData><printOptions gridLines="1"/>"#
+    );
+    let started = std::time::Instant::now();
+    let (doc, report) = from_office("hidden.xlsx", &xlsx(&sheet, &[])).unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(20), "{:?}", started.elapsed());
+    assert_eq!(report.pages, 1, "{report:?}");
+    let doc = reopen(&doc);
+    let text = content(&doc, &pages(&doc)[0]);
+    assert!(text.contains("(Topo)") && text.contains("(Base)"));
+    // Three horizontal gridlines (above, between and below the two visible rows) and the
+    // column's two vertical ones.
+    assert_eq!(text.matches(" l S").count(), 5, "{text}");
+}

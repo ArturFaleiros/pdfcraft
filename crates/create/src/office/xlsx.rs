@@ -1014,6 +1014,21 @@ fn draw_sheet(canvas: &mut Canvas, sh: &Sheet, styles: &Styles, notes: &mut Note
     };
     let col_bands = bands(max_col, &width, area_w / k);
     let row_bands = bands(max_row, &row_h, area_h / k);
+    // Running totals, so a column's or row's offset on its page is two lookups instead of a sum
+    // over the band before it (a band of hidden columns or rows can be thousands long):
+    // `col_at[c]` is the width of the columns before `c`, `row_at[r]` the height of the rows
+    // before `r`; both go one past the last, for the far edge.
+    let running = |n: u32, size: &dyn Fn(u32) -> f64| -> Vec<f64> {
+        let mut at = vec![0.0; 2];
+        for i in 1..=n {
+            let last = at.last().copied().unwrap_or(0.0);
+            at.push(last + size(i));
+        }
+        at
+    };
+    let col_at = running(max_col, &width);
+    let row_at = running(max_row, &row_h);
+    let at = |v: &[f64], i: u32| v.get(i as usize).or(v.last()).copied().unwrap_or(0.0);
     // Only the pages a cell is on, found from the cells: a sparse sheet (one value at XFD1048576,
     // wide columns, tall rows) has billions of empty ones. Ordered down, then over.
     let band_of = |bands: &[(u32, u32)], i: u32| bands.partition_point(|(_, end)| *end < i);
@@ -1037,16 +1052,27 @@ fn draw_sheet(canvas: &mut Canvas, sh: &Sheet, styles: &Styles, notes: &mut Note
                 super::canvas::n((ph - mt) * (1.0 - k))
             ));
         }
-        let x_of = |c: u32| ml + (*c0..c).map(width).sum::<f64>();
-        let y_of = |r: u32| ph - mt - (*r0..r).map(row_h).sum::<f64>();
+        let x_of = |c: u32| ml + at(&col_at, c) - at(&col_at, *c0);
+        let y_of = |r: u32| ph - mt - (at(&row_at, r) - at(&row_at, *r0));
         if sh.gridlines {
             let (xa, xb) = (x_of(*c0), x_of(c1 + 1));
             let (ya, yb) = (y_of(*r0), y_of(r1 + 1));
+            // A hidden column or row puts its gridline where the next one goes: draw it once.
+            let mut last = f64::NAN;
             for c in *c0..=c1 + 1 {
-                page.line(x_of(c), ya, x_of(c), yb, 0.25, [0.75; 3]);
+                let x = x_of(c);
+                if (x - last).abs() > 0.01 || c == *c0 {
+                    page.line(x, ya, x, yb, 0.25, [0.75; 3]);
+                    last = x;
+                }
             }
+            last = f64::NAN;
             for r in *r0..=r1 + 1 {
-                page.line(xa, y_of(r), xb, y_of(r), 0.25, [0.75; 3]);
+                let y = y_of(r);
+                if (y - last).abs() > 0.01 || r == *r0 {
+                    page.line(xa, y, xb, y, 0.25, [0.75; 3]);
+                    last = y;
+                }
             }
         }
         // Fills first, then text, then borders on top. The page's cells, row by occupied row and
