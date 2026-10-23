@@ -3119,6 +3119,11 @@ fn office_pdf(now: Option<i64>, name: &str, bytes: &[u8]) -> Result<(Arc<Vec<u8>
         guard(|| pdfcraft_create::from_office(name, bytes)).map_err(|_| EditError::Source(format!("{name}: the file could not be read")))??;
     let opts = SaveOptions { mod_date: now.map(pdfcraft_cos::pdf_date), ..SaveOptions::default() };
     let pdf = write_full(&doc, &opts).map(Arc::new).map_err(|e| EditError::Write(e.to_string()))?;
+    // Checked like every new file (`Session::write_new`) before anyone writes or opens it: it
+    // reopens, and shows the pages it was built from.
+    let expected = pdfcraft_organize::page_count(&doc)?;
+    pdfcraft_cos::Document::open(pdf.clone()).map_err(|e| EditError::Reopen(e.to_string()))?;
+    pdfcraft_render::check_pages(pdf.clone(), None, expected).map_err(|e| EditError::Reopen(e.to_string()))?;
     Ok((pdf, report))
 }
 

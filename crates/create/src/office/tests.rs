@@ -225,6 +225,11 @@ fn long_documents_paginate_and_tables_split_across_pages() {
 // ── PowerPoint ──────────────────────────────────────────────────────────────────────────────
 
 fn pptx(slides: &[&str], hidden: &[bool]) -> Vec<u8> {
+    pptx_with_master(slides, hidden, "")
+}
+
+/// [`pptx`] with `master_extra` (shapes) added to the slide master's shape tree.
+fn pptx_with_master(slides: &[&str], hidden: &[bool], master_extra: &str) -> Vec<u8> {
     let theme = format!(
         r#"<a:theme xmlns:a="{A}"><a:themeElements><a:clrScheme name="t"><a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1><a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="44546A"/></a:dk2><a:lt2><a:srgbClr val="E7E6E6"/></a:lt2><a:accent1><a:srgbClr val="4472C4"/></a:accent1></a:clrScheme><a:fontScheme name="f"><a:majorFont><a:latin typeface="Georgia"/></a:majorFont><a:minorFont><a:latin typeface="Arial"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>"#
     );
@@ -233,7 +238,7 @@ fn pptx(slides: &[&str], hidden: &[bool]) -> Vec<u8> {
         <p:sp><p:nvSpPr><p:cNvPr id="2" name="Title"/><p:cNvSpPr/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="457200" y="274638"/><a:ext cx="8229600" cy="1143000"/></a:xfrm></p:spPr></p:sp>
         <p:sp><p:nvSpPr><p:cNvPr id="3" name="Body"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="457200" y="1600200"/><a:ext cx="8229600" cy="4525963"/></a:xfrm></p:spPr></p:sp>
         <p:sp><p:nvSpPr><p:cNvPr id="4" name="Band"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="6629400"/><a:ext cx="9144000" cy="228600"/></a:xfrm><a:prstGeom prst="rect"/><a:solidFill><a:schemeClr val="accent1"/></a:solidFill></p:spPr></p:sp>
-        </p:spTree></p:cSld><p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1"/>
+        {master_extra}</p:spTree></p:cSld><p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1"/>
         <p:txStyles><p:titleStyle><a:lvl1pPr algn="ctr"><a:defRPr sz="4400"/></a:lvl1pPr></p:titleStyle><p:bodyStyle><a:lvl1pPr marL="342900" indent="-342900"><a:buChar char="•"/><a:defRPr sz="2800"/></a:lvl1pPr><a:lvl2pPr marL="742950" indent="-285750"><a:buChar char="–"/><a:defRPr sz="2400"/></a:lvl2pPr></p:bodyStyle><p:otherStyle><a:lvl1pPr><a:defRPr sz="1800"/></a:lvl1pPr></p:otherStyle></p:txStyles></p:sldMaster>"#
     );
     let layout = format!(
@@ -347,7 +352,9 @@ fn xlsx_styled(sheet: &str, extra_sheets: &[(&str, &str, bool)], workbook_pr: &s
         let id = format!("rIdX{i}");
         let state = if *hidden { r#" state="hidden""# } else { "" };
         sheets.push_str(&format!(r#"<sheet name="{name}" sheetId="{}" r:id="{id}"{state}/>"#, i + 2));
-        wb_rels.push((id, "worksheet", format!("worksheets/sheet{}.xml", i + 2)));
+        // A sheet named "Macro…" is related as an Excel 4 macro sheet, not a worksheet.
+        let ty = if name.starts_with("Macro") { "xlMacrosheet" } else { "worksheet" };
+        wb_rels.push((id, ty, format!("worksheets/sheet{}.xml", i + 2)));
         parts.push((format!("xl/worksheets/sheet{}.xml", i + 2), format!(r#"<worksheet xmlns="{S}" xmlns:r="{R}">{body}</worksheet>"#).into_bytes()));
     }
     let wb = format!(r#"<workbook xmlns="{S}" xmlns:r="{R}">{workbook_pr}<sheets>{sheets}</sheets></workbook>"#);
@@ -674,4 +681,40 @@ fn gridlines_over_many_hidden_rows_are_drawn_once_and_quickly() {
     // Three horizontal gridlines (above, between and below the two visible rows) and the
     // column's two vertical ones.
     assert_eq!(text.matches(" l S").count(), 5, "{text}");
+}
+
+/// A macro sheet is a relationship of its own type: its cells are not printed, and the report
+/// says it was left out.
+#[test]
+fn macro_sheets_are_left_out_and_reported() {
+    let main = r#"<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Vendas</t></is></c></row></sheetData>"#;
+    let macro_sheet = r#"<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>=HALT()</t></is></c></row></sheetData>"#;
+    let (doc, report) = from_office("macros.xlsm", &xlsx(main, &[("Macro1", macro_sheet, false)])).unwrap();
+    assert_eq!(report.pages, 1, "{report:?}");
+    assert!(report.notes.iter().any(|n| n.contains("macro sheets, left out")), "{report:?}");
+    let text = all_text(&reopen(&doc));
+    assert!(text.contains("(Vendas)") && !text.contains("HALT"), "{text}");
+}
+
+/// Placeholder lookups use an index built once per slide: a slide of 10 000 placeholders over a
+/// master holding 50 000 used to walk the whole master for every one of them.
+#[test]
+fn placeholder_lookups_over_a_large_master_are_quick() {
+    let sp = |id: usize, idx: usize| {
+        format!(
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="{id}" name="P"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="{idx}"/></p:nvPr></p:nvSpPr><p:spPr/></p:sp>"#
+        )
+    };
+    // Wrapped in an element the importer doesn't draw: the lookups still walked all of it.
+    let master = format!("<p:custDataLst>{}</p:custDataLst>", (0..50_000).map(|i| sp(100 + i, 100_000 + i)).collect::<String>());
+    let mut slide: String = (0..10_000).map(|i| sp(10 + i, 900_000 + i)).collect();
+    slide.push_str(r#"<p:sp><p:nvSpPr><p:cNvPr id="5" name="Title"/><p:cNvSpPr/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:p><a:r><a:t>Titulo</a:t></a:r></a:p></p:txBody></p:sp>"#);
+    let started = std::time::Instant::now();
+    let (doc, report) = from_office("big.pptx", &pptx_with_master(&[&slide], &[], &master)).unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(20), "{:?}", started.elapsed());
+    assert_eq!(report.pages, 1, "{report:?}");
+    let doc = reopen(&doc);
+    // The title still takes the master title placeholder's 44 pt style.
+    let text = content(&doc, &pages(&doc)[0]);
+    assert!(text.contains("(Titulo)") && text.contains(" 44 Tf"), "{text}");
 }

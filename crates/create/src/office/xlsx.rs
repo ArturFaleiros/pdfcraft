@@ -1210,8 +1210,11 @@ pub(crate) fn convert(zip: &Zip<'_>, main: &str, doc: &mut Document, notes: &mut
             notes.add("hidden sheets, left out");
             continue;
         }
-        let Some(part) = rel_attr(s, "id").and_then(|id| rels.target(id)) else { continue };
-        if !part.contains("worksheet") && !part.contains("sheet") {
+        let Some(id) = rel_attr(s, "id") else { continue };
+        let Some(part) = rels.target(id) else { continue };
+        // Chart sheets, dialog sheets and macro sheets (xlMacrosheet) are relationships of their
+        // own types; only worksheets are printed.
+        if rels.type_of(id) != Some("worksheet") {
             notes.add("chart sheets and macro sheets, left out");
             continue;
         }

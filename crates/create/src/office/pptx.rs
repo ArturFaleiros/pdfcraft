@@ -396,21 +396,39 @@ fn ph_kind(ty: &str) -> &str {
     }
 }
 
-/// The matching placeholder in a layout or master shape tree: by index, else by type.
-fn find_ph<'a, 'i>(tree: Option<Node<'a, 'i>>, ty: &str, idx: Option<&str>) -> Option<Node<'a, 'i>> {
-    let tree = tree?;
-    let all: Vec<Node<'a, 'i>> = tree.descendants().filter(|n| is(*n, "sp")).collect();
-    if let Some(i) = idx
-        && let Some(n) = all.iter().find(|n| placeholder(**n).is_some_and(|(_, pi)| pi.as_deref() == Some(i)))
-    {
-        return Some(*n);
+/// A layout's or master's placeholders, found in one walk of its shape tree: the first of each
+/// index and the first of each kind. A slide looks its placeholders up here for every shape, so a
+/// large inherited tree is walked once per slide, not once per lookup.
+#[derive(Default)]
+struct Placeholders<'a, 'i> {
+    by_idx: HashMap<String, Node<'a, 'i>>,
+    by_kind: HashMap<String, Node<'a, 'i>>,
+}
+
+impl<'a, 'i> Placeholders<'a, 'i> {
+    fn of(tree: Option<Node<'a, 'i>>) -> Self {
+        let mut p = Placeholders::default();
+        for n in tree.into_iter().flat_map(|t| t.descendants().filter(|n| is(*n, "sp"))) {
+            let Some((ty, idx)) = placeholder(n) else { continue };
+            if let Some(i) = idx {
+                p.by_idx.entry(i).or_insert(n);
+            }
+            p.by_kind.entry(ph_kind(&ty).to_owned()).or_insert(n);
+        }
+        p
     }
-    all.into_iter().find(|n| placeholder(*n).is_some_and(|(t, _)| ph_kind(&t) == ph_kind(ty)))
+
+    /// The matching placeholder: by index, else by type.
+    fn find(&self, ty: &str, idx: Option<&str>) -> Option<Node<'a, 'i>> {
+        idx.and_then(|i| self.by_idx.get(i)).or_else(|| self.by_kind.get(ph_kind(ty))).copied()
+    }
 }
 
 struct Inherit<'a, 'i> {
     layout: Option<Node<'a, 'i>>,
     master: Option<Node<'a, 'i>>,
+    layout_ph: Placeholders<'a, 'i>,
+    master_ph: Placeholders<'a, 'i>,
     title: Levels,
     body: Levels,
     other: Levels,
@@ -766,8 +784,8 @@ fn text_body(
     };
     let mut body_props: Vec<Node<'_, '_>> = Vec::new();
     if let Some((ty, idx)) = &ph {
-        for tree in [inh.master, inh.layout] {
-            if let Some(m) = find_ph(tree, ty, idx.as_deref()).and_then(|s| child(s, "txBody")) {
+        for tree in [&inh.master_ph, &inh.layout_ph] {
+            if let Some(m) = tree.find(ty, idx.as_deref()).and_then(|s| child(s, "txBody")) {
                 if let Some(ls) = child(m, "lstStyle") {
                     levels.merge(&Levels::parse(ls, c));
                 }
@@ -974,9 +992,9 @@ fn shapes(
         let own = sppr.and_then(|p| child(p, "xfrm")).or_else(|| child(e, "xfrm")).and_then(frame_of);
         let frame = own.or_else(|| {
             let (ty, idx) = ph.as_ref()?;
-            [inh.layout, inh.master]
+            [&inh.layout_ph, &inh.master_ph]
                 .into_iter()
-                .find_map(|t| find_ph(t, ty, idx.as_deref()).and_then(|s| child(s, "spPr")).and_then(|p| child(p, "xfrm")).and_then(frame_of))
+                .find_map(|t| t.find(ty, idx.as_deref()).and_then(|s| child(s, "spPr")).and_then(|p| child(p, "xfrm")).and_then(frame_of))
         });
         match name {
             "grpSp" => {
@@ -1369,9 +1387,13 @@ pub(crate) fn convert(zip: &Zip<'_>, main: &str, doc: &mut Document, notes: &mut
         }
         let major = colors.major.clone();
         title.0.iter_mut().filter(|l| l.font.is_none()).for_each(|l| l.font = Some(major.clone()));
+        let layout_tree = layout_doc.as_ref().and_then(|d| xml::path(d.root_element(), &["cSld", "spTree"]));
+        let master_tree = master_doc.as_ref().and_then(|d| xml::path(d.root_element(), &["cSld", "spTree"]));
         let inh = Inherit {
-            layout: layout_doc.as_ref().and_then(|d| xml::path(d.root_element(), &["cSld", "spTree"])),
-            master: master_doc.as_ref().and_then(|d| xml::path(d.root_element(), &["cSld", "spTree"])),
+            layout: layout_tree,
+            master: master_tree,
+            layout_ph: Placeholders::of(layout_tree),
+            master_ph: Placeholders::of(master_tree),
             title,
             body,
             other,

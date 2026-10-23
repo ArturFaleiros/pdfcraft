@@ -88,6 +88,11 @@ impl Rels {
         self.0.iter().find(|(_, _, ext, t)| t == ty && !ext).map(|(_, t, _, _)| t.as_str())
     }
 
+    /// The relationship type of an id (the last segment of its URI, e.g. `worksheet`).
+    pub(crate) fn type_of(&self, id: &str) -> Option<&str> {
+        self.0.iter().find(|(i, ..)| i == id).map(|(.., t)| t.as_str())
+    }
+
     /// Whether the id names an external target (a linked, not embedded, resource).
     pub(crate) fn is_external(&self, id: &str) -> bool {
         self.0.iter().any(|(i, _, ext, _)| i == id && *ext)
