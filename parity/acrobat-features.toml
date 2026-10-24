@@ -5637,7 +5637,7 @@ status = "shipped"
 commands = ["redact.mark"]
 tools = ["redact_mark"]
 evidence = ["crates/ui-egui/tests/it/redact.rs::marking_applying_and_clearing", "crates/redact/src/tests.rs::images_are_removed_or_have_their_pixels_cleared"]
-notes = "drag a box anywhere else"
+notes = "drag a box anywhere else; plain 8-bit gray/RGB JPEGs preserve uncovered decoded samples with Flate output; CMYK/complex spaces and unsupported masks/codecs still fail closed"
 
 [[feature]]
 id = "protect.redact-pages"
@@ -5780,8 +5780,8 @@ milestone = "M8"
 status = "shipped"
 commands = ["redact.apply"]
 tools = ["redact_apply"]
-evidence = ["crates/redact/src/tests.rs::images_are_removed_or_have_their_pixels_cleared", "crates/redact/src/tests.rs::redaction_clears_pixels_intersected_without_covering_their_centres"]
-notes = "intersected pixel footprints are cleared conservatively in a copy; DCT/JPX/JBIG2/CCITT images removed whole"
+evidence = ["crates/redact/src/tests.rs::images_are_removed_or_have_their_pixels_cleared", "crates/redact/src/tests.rs::redaction_clears_pixels_intersected_without_covering_their_centres", "crates/redact/src/tests.rs::jpeg_redaction_preserves_uncovered_samples_and_retires_original_after_save"]
+notes = "intersected pixel footprints are cleared conservatively in a copy; 8-bit gray/RGB DCT is decoded and the copy written as Flate; CMYK and other DCT, JPX, JBIG2 and CCITT images removed whole"
 
 [[feature]]
 id = "protect.redact-vectors"
