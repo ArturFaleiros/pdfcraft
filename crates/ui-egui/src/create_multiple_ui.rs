@@ -51,7 +51,8 @@ impl PdfCraftApp {
                     continue;
                 }
             };
-            approximated.extend(report.and_then(|report| crate::office_note(&name, &report)));
+            // Noted only once the PDF is written: a file left out below has no conversion to report.
+            let note = report.and_then(|report| crate::office_note(&name, &report));
             if kind == SourceKind::Pdf {
                 refused.push(format!("{name} ({})", tl!("already a PDF")));
                 continue;
@@ -83,7 +84,10 @@ impl PdfCraftApp {
                 crate::editing::download(&filename, &pdf)
             };
             match result {
-                Ok(()) => made += 1,
+                Ok(()) => {
+                    made += 1;
+                    approximated.extend(note);
+                }
                 Err(error) => refused.push(format!("{filename} ({error})")),
             }
         }

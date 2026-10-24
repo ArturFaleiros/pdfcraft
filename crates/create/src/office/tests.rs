@@ -339,7 +339,7 @@ fn xlsx_styled(sheet: &str, extra_sheets: &[(&str, &str, bool)], workbook_pr: &s
         <fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font></fonts>
         <fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor theme="4"/></patternFill></fill></fills>
         <borders count="2"><border/><border><left style="thin"/><right style="thin"/><top style="thin"/><bottom style="medium"><color rgb="FF0000FF"/></bottom></border></borders>
-        <cellXfs count="5"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/><xf numFmtId="164" fontId="0" fillId="0" borderId="1" applyNumberFormat="1"/><xf numFmtId="165" fontId="0" fillId="0" borderId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="1"><alignment horizontal="center"/></xf><xf numFmtId="10" fontId="0" fillId="0" borderId="0"/></cellXfs></styleSheet>"#
+        <cellXfs count="6"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/><xf numFmtId="164" fontId="0" fillId="0" borderId="1" applyNumberFormat="1"/><xf numFmtId="165" fontId="0" fillId="0" borderId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="1"><alignment horizontal="center"/></xf><xf numFmtId="10" fontId="0" fillId="0" borderId="0"/><xf numFmtId="0" fontId="0" fillId="0" borderId="0"><alignment wrapText="1"/></xf></cellXfs></styleSheet>"#
     );
     let shared = format!(
         r#"<sst xmlns="{S}" count="3"><si><t>Produto</t></si><si><t>Preço</t></si><si><r><t>Caf</t></r><r><rPr><b/></rPr><t>é</t></r><rPh><t>X</t></rPh></si></sst>"#
@@ -644,6 +644,21 @@ fn a_sparse_sheet_prints_only_its_occupied_page_quickly() {
     assert!(started.elapsed() < std::time::Duration::from_secs(20), "{:?}", started.elapsed());
     assert_eq!(report.pages, 1, "{report:?}");
     assert!(all_text(&reopen(&doc)).contains("(Fim)"));
+}
+
+/// A line break inside a cell starts a new line when the cell wraps, and is a space when it
+/// doesn't; it is never dropped, joining the words on either side.
+#[test]
+fn line_breaks_in_cells_are_kept() {
+    let sheet = r#"<cols><col min="1" max="2" width="30" customWidth="1"/></cols><sheetData><row r="1">
+      <c r="A1" t="inlineStr" s="5"><is><t>Linha um
+Linha dois</t></is></c>
+      <c r="B1" t="inlineStr"><is><t>Sem
+quebra</t></is></c></row></sheetData>"#;
+    let (doc, _) = from_office("quebras.xlsx", &xlsx(sheet, &[])).unwrap();
+    let text = all_text(&reopen(&doc));
+    assert!(text.contains("(Linha um)") && text.contains("(Linha dois)"), "{text}");
+    assert!(text.contains("(Sem quebra)"), "{text}");
 }
 
 /// Every cell re-reads its number format, so a format of a million zeros (Excel stops at 255

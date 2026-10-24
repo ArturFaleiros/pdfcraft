@@ -489,5 +489,11 @@ fn create_from_multiple_files_reports_office_approximations() {
     let toast = app.toast.as_ref().map(|(t, _)| t.clone()).unwrap_or_default();
     assert!(toast.starts_with("Wrote 1 file to ") && toast.contains("Converted formula.docx. Approximated: equations"), "{toast}");
     assert!(dir.join("formula.pdf").exists());
+    // A file whose PDF can't be written is left out, with no conversion note of its own.
+    let not_a_dir = dir.join("formula.pdf");
+    app.export_dir_override = Some(not_a_dir.to_string_lossy().into_owned());
+    app.use_files(FilePurpose::CreateMultipleSeparate, vec![("formula.docx".into(), docx_with_equation())]);
+    let toast = app.toast.as_ref().map(|(t, _)| t.clone()).unwrap_or_default();
+    assert!(toast.starts_with("Left out: formula.pdf") && !toast.contains("Converted formula.docx"), "{toast}");
     std::fs::remove_dir_all(&dir).unwrap();
 }

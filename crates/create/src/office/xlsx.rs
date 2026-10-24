@@ -955,7 +955,10 @@ fn draw_sheet(canvas: &mut Canvas, sh: &Sheet, styles: &Styles, notes: &mut Note
     let mut wrapped: HashMap<(u32, u32), Vec<String>> = HashMap::new();
     let mut texts: HashMap<(u32, u32), String> = HashMap::new();
     for ((r, c), cell) in &sh.cells {
-        texts.insert((*r, *c), notes.drawable(&cell.text));
+        // Line breaks are split on below (or become spaces), and `drawable` drops control
+        // characters, so each line is made drawable on its own.
+        let lines: Vec<String> = cell.text.split('\n').map(|line| notes.drawable(line)).collect();
+        texts.insert((*r, *c), lines.join("\n"));
     }
     for r in 1..=max_row {
         let h = if sh.hidden_rows.contains(&r) { 0.0 } else { sh.heights.get(&r).map_or(sh.default_h, |(h, _)| *h) };
