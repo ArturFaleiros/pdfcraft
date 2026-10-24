@@ -180,9 +180,9 @@ update the numbers.
   ([office-import.md](office-import.md)); `create.from-office` partial.
 - **Missing:** Word export that keeps layout; Excel and PowerPoint export; Office import with
   embedded fonts (text is set in the standard 14, so Greek, Cyrillic, CJK and other scripts are
-  written as `[U+XXXX]` and line breaks can differ), charts and SmartArt, the legacy binary
-  formats and OpenDocument; creating PDFs from HTML, web pages and PostScript; SVG/XML/EPS/PS/JPEG
-  2000 export.
+  written as `[U+XXXX]` and line breaks can differ), charts and SmartArt drawn as more than
+  outlined boxes (Excel charts are left out), the legacy binary formats and OpenDocument; creating
+  PDFs from HTML, web pages and PostScript; SVG/XML/EPS/PS/JPEG 2000 export.
 - **Evidence:** `create.export-docx` partial; the synthetic invoice regression for
   [#773](https://github.com/storytold/pdfcraft/issues/773) now covers absent inferred borders,
   floating watermark text and per-page section sizes. Exact font matching, vector rules and
