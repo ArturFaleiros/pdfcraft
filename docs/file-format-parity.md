@@ -68,7 +68,7 @@ features total).
 | Plain text | yes | yes | good | `create.from-text` |
 | Clipboard (image or text) | yes | yes | good | `create.from-clipboard` |
 | Screenshot | yes | no | none | `create.from-screenshot` planned |
-| Word, Excel, PowerPoint (and Visio, Publisher on Windows) | yes | partial: `.docx`/`.pptx`/`.xlsx` and their macro and template variants, natively (no Visio, Publisher, legacy binary or OpenDocument) | basic (standard-14 fonts; charts and SmartArt are boxes) | `create.from-office` partial; [office-import.md](office-import.md) |
+| Word, Excel, PowerPoint (and Visio, Publisher on Windows) | yes | partial: `.docx`, `.docm`, `.dotx`, `.pptx`, `.pptm`, `.ppsx`, `.potx`, `.xlsx`, `.xlsm`, `.xltx`, natively (no Visio, Publisher, legacy binary or OpenDocument) | basic (standard-14 fonts; charts and SmartArt are boxes) | `create.from-office` partial; [office-import.md](office-import.md) |
 | HTML file, web page URL | yes | no | none | `create.from-html`, `create.from-web-page` planned |
 | RTF | yes | no | none | |
 | PostScript / EPS (Distiller) | yes | no | none | `create.distiller` planned (P3) |
