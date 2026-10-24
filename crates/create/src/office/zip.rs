@@ -127,18 +127,21 @@ impl<'a> Zip<'a> {
             0 => data.get(..cap.min(data.len())).unwrap_or_default().to_vec(),
             8 => {
                 let mut out = Vec::new();
-                flate2::read::DeflateDecoder::new(data)
-                    .take(cap as u64 + 1)
-                    .read_to_end(&mut out)
-                    .map_err(|err| format!("{}: the part can't be decompressed ({err})", e.name))?;
+                let inflated = flate2::read::DeflateDecoder::new(data).take(cap as u64 + 1).read_to_end(&mut out);
+                // The work is counted even when the part then fails, so a failing part read again
+                // and again can't inflate past the package's budget (`out` keeps what was read).
+                self.read.set(self.read.get().saturating_add(out.len()));
+                inflated.map_err(|err| format!("{}: the part can't be decompressed ({err})", e.name))?;
                 out
             }
             m => return Err(format!("{}: compression method {m} is not supported", e.name)),
         };
+        if e.method == 0 {
+            self.read.set(self.read.get().saturating_add(out.len()));
+        }
         if out.len() > cap {
             return Err(format!("{}: the part is larger than its directory says", e.name));
         }
-        self.read.set(self.read.get().saturating_add(out.len()));
         Ok(Some(out))
     }
 
@@ -270,6 +273,20 @@ pub(crate) mod tests {
         let at = z.windows(4).position(|w| w == b"PK\x01\x02").unwrap() + 24;
         z[at..at + 4].copy_from_slice(&3u32.to_le_bytes());
         assert!(Zip::open(&z).unwrap().read("a.xml").unwrap_err().contains("larger than its directory"));
+    }
+
+    #[test]
+    fn failed_reads_still_count_against_the_package_budget() {
+        // A part that inflates past its directory size fails each time it is read, but the work
+        // done before failing is counted, so rereading it can't inflate without bound.
+        let mut z = build(&[("big.bin", &vec![0u8; MAX_PART + 1])]);
+        let at = z.windows(4).position(|w| w == b"PK\x01\x02").unwrap() + 24;
+        z[at..at + 4].copy_from_slice(&(MAX_PART as u32).to_le_bytes());
+        let zip = Zip::open(&z).unwrap();
+        for _ in 0..MAX_TOTAL / MAX_PART - 1 {
+            assert!(zip.read("big.bin").unwrap_err().contains("larger than its directory"));
+        }
+        assert!(zip.read("big.bin").unwrap_err().contains("expands to more than"));
     }
 
     #[test]
