@@ -2723,6 +2723,15 @@ certificate	Version	وەشان
 	Word, PowerPoint and Excel (converted to PDF)	Word، PowerPoint و Excel (گۆڕدراو بۆ PDF)
 	PDF, images, text and Office documents	PDF، وێنە، دەق و بەڵگەنامەکانی Office
 	Converted {name}. Approximated: {notes}	{name} گۆڕدرا. نزیککراوەکان: {notes}
+	Create & Edit	دروستکردن و دەستکاریکردن
+	Review & Compare	پێداچوونەوە و بەراوردکردن
+	Forms & Signatures	فۆڕمەکان و واژووەکان
+	Protect & Standardize	پاراستن و ستانداردکردن
+	Customize & Automate	تایبەتکردن و خۆکارکردن
+	No tools match your search.	هیچ ئامرازێک لەگەڵ گەڕانەکەت ناگونجێت.
+	Expand all tools	فراوانکردنی هەموو ئامرازەکان
+	Collapse all tools	کۆکردنەوەی هەموو ئامرازەکان
 
 # Date picker: Today button (#4274) (AI-assisted, not separately native-reviewed)
 	Today	ئەمڕۆ
+@plural	{n} reply|{n} replies	{n} وەڵام|{n} وەڵام
