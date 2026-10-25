@@ -1352,10 +1352,13 @@ pub(crate) fn convert(zip: &Zip<'_>, main: &str, doc: &mut Document, notes: &mut
         .iter()
         .enumerate()
         .filter(|(_, (part, ..))| {
-            let shown = texts
-                .get(part)
-                .and_then(|t| xml::parse(t).ok().map(|d| attr(d.root_element(), "show").is_none_or(|v| flag(Some(v)))))
-                .unwrap_or(true);
+            // A slide that can't be read is left out here, not when drawing, so it isn't counted
+            // in the slide numbers either.
+            let Some(slide) = texts.get(part).and_then(|t| xml::parse(t).ok()) else {
+                notes.add("slides whose part is missing or damaged, left out");
+                return false;
+            };
+            let shown = attr(slide.root_element(), "show").is_none_or(|v| flag(Some(v)));
             if !shown {
                 notes.add("hidden slides, left out as PowerPoint does when saving a PDF");
             }

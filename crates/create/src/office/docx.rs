@@ -690,6 +690,9 @@ struct Cx<'z, 'd> {
     images: HashMap<String, Option<ObjRef>>,
     /// Footnote and endnote references in order: (kind, id, label).
     note_refs: Vec<(&'static str, String, String)>,
+    /// How many footnote and endnote references `note_refs` holds, for their labels.
+    footnotes: usize,
+    endnotes: usize,
 }
 
 impl Cx<'_, '_> {
@@ -899,10 +902,14 @@ impl Cx<'_, '_> {
                 ("pict" | "object", _) => self.vml(c, rels, para, extra, depth),
                 ("footnoteReference" | "endnoteReference", _) => {
                     let kind = if name == "footnoteReference" { "footnote" } else { "endnote" };
-                    let label = (self.note_refs.iter().filter(|(k, _, _)| *k == kind).count() + 1).to_string();
-                    let label = if kind == "endnote" { roman(label.parse().unwrap_or(1)) } else { label };
+                    // A running count per kind: recounting the earlier references made each one cost
+                    // as much as all before it.
+                    let count = if kind == "footnote" { &mut self.footnotes } else { &mut self.endnotes };
+                    let number = count.saturating_add(1);
+                    let label = if kind == "endnote" { roman(i64::try_from(number).unwrap_or(1)) } else { number.to_string() };
                     if let Some(id) = attr(c, "id") {
                         self.note_refs.push((kind, id.to_owned(), label.clone()));
+                        *count = number;
                     }
                     para.items.push(Inline::Text(label, RunStyle { vert: 1, ..style.clone() }));
                 }
@@ -1175,7 +1182,11 @@ impl Flow<'_> {
         if let (Some(style), Some((prev, prev_after))) = (&p.contextual, &self.prev_contextual)
             && style == prev
         {
-            self.y += prev_after;
+            // The previous paragraph's space after was left on the page it ended; a paragraph
+            // starting a new page has none to take back.
+            if !self.at_top {
+                self.y += prev_after;
+            }
             before = 0.0;
         }
         self.prev_contextual = None;
@@ -1396,7 +1407,7 @@ pub(crate) fn convert(zip: &Zip<'_>, main: &str, doc: &mut Document, notes: &mut
     let theme = load_theme(zip, &rels);
     let styles = load_styles(zip, &rels)?;
     let numbering = load_numbering(zip, &rels)?;
-    let mut cx = Cx { zip, doc, notes, styles, numbering, theme, images: HashMap::new(), note_refs: Vec::new() };
+    let mut cx = Cx { zip, doc, notes, styles, numbering, theme, images: HashMap::new(), note_refs: Vec::new(), footnotes: 0, endnotes: 0 };
 
     // Split the body into sections: a paragraph carrying a sectPr ends one.
     let final_sect = child(body, "sectPr");
@@ -1450,7 +1461,6 @@ pub(crate) fn convert(zip: &Zip<'_>, main: &str, doc: &mut Document, notes: &mut
                     match b {
                         Block::Para(p) if i == 0 => {
                             let mut p = p.clone();
-                            p.items.retain(|it| !matches!(it, Inline::Text(t, s) if s.vert == 1 && t.chars().all(|c| c.is_ascii_alphanumeric())));
                             let st =
                                 p.items.iter().find_map(|it| if let Inline::Text(_, s) = it { Some(s.clone()) } else { None }).unwrap_or_default();
                             p.items.insert(0, Inline::Text(format!("{label} "), RunStyle { vert: 1, ..st }));

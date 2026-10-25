@@ -147,13 +147,16 @@ impl<'a> Zip<'a> {
 
     /// A part as UTF-8 text (a byte order mark is dropped), `Ok(None)` when absent.
     pub(crate) fn text(&self, name: &str) -> Result<Option<String>, String> {
-        let Some(bytes) = self.read(name)? else { return Ok(None) };
-        let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&bytes);
+        let Some(mut bytes) = self.read(name)? else { return Ok(None) };
+        if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+            bytes.drain(..3);
+        }
         // OOXML parts are UTF-8 or UTF-16 XML; UTF-16 is rare enough to decode leniently.
-        if let Some((enc, bom)) = encoding_rs::Encoding::for_bom(bytes) {
+        if let Some((enc, bom)) = encoding_rs::Encoding::for_bom(&bytes) {
             return Ok(Some(enc.decode_without_bom_handling(bytes.get(bom..).unwrap_or_default()).0.into_owned()));
         }
-        Ok(Some(String::from_utf8_lossy(bytes).into_owned()))
+        // Valid UTF-8 (the usual case) becomes the text without a second copy of the part.
+        Ok(Some(String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())))
     }
 }
 

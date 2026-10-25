@@ -759,3 +759,65 @@ fn a_large_master_shared_by_many_slides_is_parsed_once() {
     let doc = reopen(&doc);
     assert!(content(&doc, &pages(&doc)[199]).contains("(Slide200)"));
 }
+
+/// Contextual spacing takes back the space after the previous paragraph only on the page that
+/// space was left on: a paragraph that starts a new page starts at the top margin.
+#[test]
+fn contextual_spacing_after_a_page_break_starts_at_the_top() {
+    let item = |t: &str, extra: &str| {
+        format!(r#"<w:p><w:pPr>{extra}<w:spacing w:before="0" w:after="4000"/><w:contextualSpacing/></w:pPr><w:r><w:t>{t}</w:t></w:r></w:p>"#)
+    };
+    let body = format!("{}{}", item("Um", ""), item("Dois", "<w:pageBreakBefore/>"));
+    let (doc, _) = from_office("ctx.docx", &docx(&body, &[], &[])).unwrap();
+    let doc = reopen(&doc);
+    let pg = pages(&doc);
+    assert_eq!(pg.len(), 2);
+    let y = |page: &Dict, w: &str| -> f64 {
+        let text = content(&doc, page);
+        let at = text.find(&format!("({w})")).unwrap();
+        let tm = text[..at].rfind(" Tm").unwrap();
+        text[..tm].split_whitespace().last().unwrap().parse().unwrap()
+    };
+    assert!((y(&pg[0], "Um") - y(&pg[1], "Dois")).abs() < 0.5, "{} vs {}", y(&pg[0], "Um"), y(&pg[1], "Dois"));
+}
+
+/// A footnote's own superscript text (m², a reference to a note in a source) is kept: only the
+/// reference mark is added in front of it.
+#[test]
+fn superscript_text_in_a_footnote_is_kept() {
+    let sup = r#"<w:rPr><w:vertAlign w:val="superscript"/></w:rPr>"#;
+    let notes = format!(
+        r#"<w:footnotes xmlns:w="{W}"><w:footnote w:id="1"><w:p><w:r>{sup}<w:footnoteRef/></w:r><w:r><w:t xml:space="preserve"> Area em m</w:t></w:r><w:r>{sup}<w:t>2</w:t></w:r></w:p></w:footnote></w:footnotes>"#
+    );
+    let body = r#"<w:p><w:r><w:t>Texto</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p>"#;
+    let (doc, _) =
+        from_office("nota.docx", &docx(body, &[("word/footnotes.xml", notes.as_bytes())], &[("rIdF", "footnotes", "footnotes.xml")])).unwrap();
+    let text = all_text(&reopen(&doc));
+    assert!(text.contains("(Area)") && text.contains("(2)"), "{text}");
+}
+
+/// Footnote marks are numbered with a running count, not by recounting every earlier reference,
+/// so a document with very many references converts quickly.
+#[test]
+fn many_footnote_references_are_numbered_quickly() {
+    let refs: String = (0..400).map(|_| r#"<w:r><w:footnoteReference w:id="9"/></w:r>"#).collect();
+    let body: String = (0..500).map(|_| format!("<w:p>{refs}</w:p>")).collect();
+    let started = std::time::Instant::now();
+    let (doc, _) = from_office("refs.docx", &docx(&body, &[], &[])).unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(20), "{:?}", started.elapsed());
+    // The marks run together with nothing between them; the last one ends the last word.
+    assert!(all_text(&reopen(&doc)).contains("200000)"));
+}
+
+/// A slide whose part is missing or damaged is left out and reported, and the slides after it
+/// are numbered as the slides actually drawn.
+#[test]
+fn a_damaged_slide_is_left_out_reported_and_not_counted() {
+    let number = r#"<p:sp><p:nvSpPr><p:cNvPr id="5" name="N"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="9144000" cy="914400"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:t>Numero </a:t></a:r><a:fld id="{1}" type="slidenum"><a:t>9</a:t></a:fld></a:p></p:txBody></p:sp>"#;
+    let (doc, report) = from_office("d.pptx", &pptx(&[number, "<broken", number], &[])).unwrap();
+    assert_eq!(report.pages, 2, "{report:?}");
+    assert!(report.notes.iter().any(|n| n.contains("missing or damaged")), "{report:?}");
+    let doc = reopen(&doc);
+    let pg = pages(&doc);
+    assert!(content(&doc, &pg[1]).contains("(2)"), "{}", content(&doc, &pg[1]));
+}
