@@ -899,6 +899,13 @@ impl Cx<'_, '_> {
                     para.items.push(Inline::Text(text, style.clone()));
                 }
                 ("drawing", _) => self.drawing(c, rels, para, extra, depth),
+                // Word 2010 and later wrap shapes and text boxes in markup compatibility: a
+                // `Choice` with DrawingML and a `Fallback` with VML. One of them is read.
+                ("AlternateContent", _) if depth < MAX_DEPTH => {
+                    if let Some(pick) = child(c, "Choice").or_else(|| child(c, "Fallback")) {
+                        self.run(pick, rels, base, para, out, extra, state, depth + 1);
+                    }
+                }
                 ("pict" | "object", _) => self.vml(c, rels, para, extra, depth),
                 ("footnoteReference" | "endnoteReference", _) => {
                     let kind = if name == "footnoteReference" { "footnote" } else { "endnote" };
@@ -934,7 +941,7 @@ impl Cx<'_, '_> {
             para.items.push(Inline::Image(r, w, h));
             return;
         }
-        let boxes: Vec<Node<'_, '_>> = data.descendants().filter(|n| is(*n, "txbxContent")).collect();
+        let boxes = outermost_boxes(data);
         if !boxes.is_empty() {
             self.notes.add("text boxes and shapes, their text placed in the flow");
             for b in boxes {
@@ -964,7 +971,7 @@ impl Cx<'_, '_> {
             para.items.push(Inline::Image(r, size.0, size.1));
             return;
         }
-        let boxes: Vec<Node<'_, '_>> = v.descendants().filter(|n| is(*n, "txbxContent")).collect();
+        let boxes = outermost_boxes(v);
         if !boxes.is_empty() {
             self.notes.add("text boxes and shapes, their text placed in the flow");
             for b in boxes {
@@ -1077,6 +1084,12 @@ impl Cx<'_, '_> {
         }
         out
     }
+}
+
+/// The text boxes in `n` that aren't inside another of its text boxes: an inner box is read with
+/// the box holding it, so collecting it here too would place it once per level of nesting.
+fn outermost_boxes<'a, 'i>(n: Node<'a, 'i>) -> Vec<Node<'a, 'i>> {
+    n.descendants().filter(|b| is(*b, "txbxContent") && !b.ancestors().skip(1).take_while(|a| *a != n).any(|a| is(a, "txbxContent"))).collect()
 }
 
 fn vml_size(style: &str) -> (f64, f64) {
@@ -1454,9 +1467,15 @@ pub(crate) fn convert(zip: &Zip<'_>, main: &str, doc: &mut Document, notes: &mut
                 ..Para::default()
             };
             blocks.push(Block::Para(rule));
+            // Each note once, however often it is referenced: a long note referenced again and
+            // again would otherwise be copied once per reference.
+            let mut placed = std::collections::HashSet::new();
             for (kind, id, label) in refs {
                 let body = if kind == "footnote" { foot.get(&id) } else { end.get(&id) };
                 let Some(body) = body else { continue };
+                if !placed.insert((kind, id)) {
+                    continue;
+                }
                 for (i, b) in body.iter().enumerate() {
                     match b {
                         Block::Para(p) if i == 0 => {

@@ -334,16 +334,24 @@ fn xlsx_with(sheet: &str, extra_sheets: &[(&str, &str, bool)], workbook_pr: &str
 
 /// [`xlsx_with`] with `format` as the number format of style 1 (`s="1"`).
 fn xlsx_styled(sheet: &str, extra_sheets: &[(&str, &str, bool)], workbook_pr: &str, format: &str) -> Vec<u8> {
+    xlsx_full(sheet, extra_sheets, workbook_pr, format, None)
+}
+
+/// [`xlsx_styled`] with `shared` (the `<si>` elements) as the shared strings when given.
+fn xlsx_full(sheet: &str, extra_sheets: &[(&str, &str, bool)], workbook_pr: &str, format: &str, shared: Option<&str>) -> Vec<u8> {
     let styles = format!(
         r#"<styleSheet xmlns="{S}"><numFmts count="2"><numFmt numFmtId="164" formatCode="{format}"/><numFmt numFmtId="165" formatCode="dd/mm/yyyy"/></numFmts>
         <fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font></fonts>
         <fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor theme="4"/></patternFill></fill></fills>
         <borders count="2"><border/><border><left style="thin"/><right style="thin"/><top style="thin"/><bottom style="medium"><color rgb="FF0000FF"/></bottom></border></borders>
-        <cellXfs count="6"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/><xf numFmtId="164" fontId="0" fillId="0" borderId="1" applyNumberFormat="1"/><xf numFmtId="165" fontId="0" fillId="0" borderId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="1"><alignment horizontal="center"/></xf><xf numFmtId="10" fontId="0" fillId="0" borderId="0"/><xf numFmtId="0" fontId="0" fillId="0" borderId="0"><alignment wrapText="1"/></xf></cellXfs></styleSheet>"#
+        <cellXfs count="7"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/><xf numFmtId="164" fontId="0" fillId="0" borderId="1" applyNumberFormat="1"/><xf numFmtId="165" fontId="0" fillId="0" borderId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="1"><alignment horizontal="center"/></xf><xf numFmtId="10" fontId="0" fillId="0" borderId="0"/><xf numFmtId="0" fontId="0" fillId="0" borderId="0"><alignment wrapText="1"/></xf><xf numFmtId="0" fontId="0" fillId="0" borderId="0"><alignment horizontal="general"/></xf></cellXfs></styleSheet>"#
     );
-    let shared = format!(
-        r#"<sst xmlns="{S}" count="3"><si><t>Produto</t></si><si><t>Preço</t></si><si><r><t>Caf</t></r><r><rPr><b/></rPr><t>é</t></r><rPh><t>X</t></rPh></si></sst>"#
-    );
+    let shared = match shared {
+        Some(items) => format!(r#"<sst xmlns="{S}">{items}</sst>"#),
+        None => format!(
+            r#"<sst xmlns="{S}" count="3"><si><t>Produto</t></si><si><t>Preço</t></si><si><r><t>Caf</t></r><r><rPr><b/></rPr><t>é</t></r><rPh><t>X</t></rPh></si></sst>"#
+        ),
+    };
     let mut sheets = r#"<sheet name="Vendas" sheetId="1" r:id="rId1"/>"#.to_string();
     let mut wb_rels = vec![("rId1".to_string(), "worksheet", "worksheets/sheet1.xml".to_string())];
     let mut parts: Vec<(String, Vec<u8>)> =
@@ -852,4 +860,152 @@ fn merged_table_cells_keep_later_cells_in_their_columns() {
     let x: f64 = text[..tm].split_whitespace().rev().nth(1).unwrap().parse().unwrap();
     // The third column starts 144 pt in; its text sits just inside it, on one line.
     assert!((144.0..160.0).contains(&x), "x = {x}\n{text}");
+}
+
+/// A text box as Word 2010 and later write it: inside `mc:AlternateContent`, whose `Choice` is the
+/// DrawingML shape and whose `Fallback` a VML copy (left empty here, so nesting stays small). Its
+/// text is placed in the flow once.
+fn text_box(inner: &str) -> String {
+    format!(
+        r#"<w:r><mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Choice Requires="wps"><w:drawing><wp:anchor><wp:extent cx="914400" cy="914400"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:txbx><w:txbxContent>{inner}</w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></mc:Choice><mc:Fallback><w:pict><v:shape xmlns:v="urn:schemas-microsoft-com:vml"><v:textbox><w:txbxContent><w:p/></w:txbxContent></v:textbox></v:shape></w:pict></mc:Fallback></mc:AlternateContent></w:r>"#
+    )
+}
+
+#[test]
+fn text_boxes_in_alternate_content_are_placed_once() {
+    let body = format!("<w:p>{}</w:p>", text_box(&p("Caixa")));
+    let (doc, report) = from_office("tb.docx", &docx(&body, &[], &[])).unwrap();
+    let text = all_text(&reopen(&doc));
+    assert_eq!(text.matches("(Caixa)").count(), 1, "{text}");
+    assert!(report.notes.iter().any(|n| n.contains("text boxes")), "{report:?}");
+}
+
+/// Text boxes nested in text boxes are each placed once: a box's own text, not every box below
+/// it again, so nesting costs as much as the boxes, not twice as much per level.
+#[test]
+fn nested_text_boxes_are_placed_once_each_quickly() {
+    let mut inner = p("Fundo");
+    for level in 0..6 {
+        inner = format!("<w:p><w:r><w:t>Nivel{level}</w:t></w:r>{}</w:p>", text_box(&inner));
+    }
+    let started = std::time::Instant::now();
+    let (doc, _) = from_office("nested.docx", &docx(&inner, &[], &[])).unwrap_or_else(|e| panic!("{e}"));
+    assert!(started.elapsed() < std::time::Duration::from_secs(20), "{:?}", started.elapsed());
+    assert_eq!(all_text(&reopen(&doc)).matches("(Fundo)").count(), 1);
+}
+
+/// A note referenced again and again is placed once, so a long note can't be copied once per
+/// reference.
+#[test]
+fn a_note_referenced_many_times_is_placed_once() {
+    let body_paras: String = (0..200).map(|i| format!("<w:p><w:r><w:t>Corpo{i}</w:t></w:r></w:p>")).collect();
+    let notes = format!(r#"<w:footnotes xmlns:w="{W}"><w:footnote w:id="1">{body_paras}</w:footnote></w:footnotes>"#);
+    let refs: String = (0..2000).map(|_| r#"<w:r><w:footnoteReference w:id="1"/></w:r>"#).collect();
+    let body = format!("<w:p><w:r><w:t>Texto</w:t></w:r>{refs}</w:p>");
+    let started = std::time::Instant::now();
+    let (doc, _) =
+        from_office("refs.docx", &docx(&body, &[("word/footnotes.xml", notes.as_bytes())], &[("rIdF", "footnotes", "footnotes.xml")])).unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(20), "{:?}", started.elapsed());
+    assert_eq!(all_text(&reopen(&doc)).matches("(Corpo199)").count(), 1);
+}
+
+/// The `x` of the first `Tm` before `word` in a content stream.
+fn x_of(text: &str, word: &str) -> f64 {
+    let at = text.find(&format!("({word})")).unwrap_or_else(|| panic!("{word} in {text}"));
+    let tm = text[..at].rfind(" Tm").unwrap();
+    text[..tm].split_whitespace().rev().nth(1).unwrap().parse().unwrap()
+}
+
+/// A slide placeholder is linked to the layout by index, but to the master by type: a content
+/// placeholder with index 2 takes the master's body style, not its date placeholder's (also 2).
+#[test]
+fn content_placeholders_inherit_the_master_body_not_its_date() {
+    let date = r#"<p:sp><p:nvSpPr><p:cNvPr id="7" name="Date"/><p:cNvSpPr/><p:nvPr><p:ph type="dt" idx="2"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="457200" y="6356350"/><a:ext cx="2133600" cy="365125"/></a:xfrm></p:spPr><p:txBody><a:bodyPr anchor="ctr"/><a:lstStyle><a:lvl1pPr algn="r"/></a:lstStyle><a:p/></p:txBody></p:sp>"#;
+    let slide = r#"<p:sp><p:nvSpPr><p:cNvPr id="3" name="Content 2"/><p:cNvSpPr/><p:nvPr><p:ph idx="2"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="9144000" cy="1828800"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:t>Conteudo</a:t></a:r></a:p></p:txBody></p:sp>"#;
+    let (doc, _) = from_office("ph.pptx", &pptx_with_master(&[slide], &[], date)).unwrap();
+    let doc = reopen(&doc);
+    let x = x_of(&content(&doc, &pages(&doc)[0]), "Conteudo");
+    assert!(x < 100.0, "left-aligned like the body, not right-aligned like the date: x = {x}");
+}
+
+/// Slide number, date and footer placeholders use the master's other-text style: no body bullets.
+#[test]
+fn slide_number_placeholders_have_no_bullets() {
+    let slide = r#"<p:sp><p:nvSpPr><p:cNvPr id="5" name="Number"/><p:cNvSpPr/><p:nvPr><p:ph type="sldNum" idx="12"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="6553200" y="6356350"/><a:ext cx="2133600" cy="365125"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:p><a:fld id="{1}" type="slidenum"><a:t>9</a:t></a:fld></a:p></p:txBody></p:sp>"#;
+    let (doc, _) = from_office("n.pptx", &pptx(&[slide], &[])).unwrap();
+    let doc = reopen(&doc);
+    let text = content(&doc, &pages(&doc)[0]);
+    assert!(text.contains("(1)"), "{text}");
+    assert!(!text.contains('\u{95}'), "no bullet before the number: {text}");
+}
+
+/// Table cells keep their line breaks and fields.
+#[test]
+fn table_cells_keep_line_breaks_and_slide_numbers() {
+    let cell = r#"<a:tc><a:txBody><a:bodyPr/><a:p><a:r><a:t>Linha1</a:t></a:r><a:br/><a:r><a:t>Linha2</a:t></a:r><a:r><a:t> slide </a:t></a:r><a:fld id="{1}" type="slidenum"><a:t>9</a:t></a:fld></a:p></a:txBody><a:tcPr/></a:tc>"#;
+    let table = format!(
+        r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="10" name="Table"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x="0" y="0"/><a:ext cx="6000000" cy="370840"/></p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table"><a:tbl><a:tblGrid><a:gridCol w="6000000"/></a:tblGrid><a:tr h="370840">{cell}</a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>"#
+    );
+    let (doc, _) = from_office("tc.pptx", &pptx(&[&table], &[])).unwrap();
+    let doc = reopen(&doc);
+    let text = content(&doc, &pages(&doc)[0]);
+    assert!(text.contains("(Linha1)") && text.contains("(Linha2)") && !text.contains("Linha1Linha2"), "{text}");
+    assert!(text.contains("(1)"), "the slide number field: {text}");
+}
+
+/// `horizontal="general"` (LibreOffice writes it on every style) is the default alignment.
+#[test]
+fn general_horizontal_alignment_is_the_default() {
+    let sheet = r#"<sheetData><row r="1"><c r="A1"><v>7</v></c></row><row r="2"><c r="A2" s="6"><v>7</v></c></row></sheetData>"#;
+    let (doc, _) = from_office("g.xlsx", &xlsx(sheet, &[])).unwrap();
+    let doc = reopen(&doc);
+    let text = content(&doc, &pages(&doc)[0]);
+    let xs: Vec<f64> = text
+        .match_indices("(7)")
+        .map(|(at, _)| {
+            let tm = text[..at].rfind(" Tm").unwrap();
+            text[..tm].split_whitespace().rev().nth(1).unwrap().parse().unwrap()
+        })
+        .collect();
+    assert_eq!(xs.len(), 2, "{text}");
+    assert!((xs[0] - xs[1]).abs() < 0.01, "both right-aligned: {xs:?}");
+}
+
+/// A stored column width already holds Excel's padding: the default column, stored as 9.140625,
+/// is 64 px wide, as wide as an unstated one.
+#[test]
+fn stored_column_widths_are_not_padded_twice() {
+    let x_b = |cols: &str| {
+        let sheet = format!(
+            r#"{cols}<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>a</t></is></c><c r="B1" t="inlineStr"><is><t>Bcol</t></is></c></row></sheetData>"#
+        );
+        let (doc, _) = from_office("w.xlsx", &xlsx(&sheet, &[])).unwrap();
+        let doc = reopen(&doc);
+        x_of(&content(&doc, &pages(&doc)[0]), "Bcol")
+    };
+    let stated = x_b(r#"<cols><col min="1" max="1" width="9.140625" customWidth="1"/></cols>"#);
+    let unstated = x_b("");
+    assert!((stated - unstated).abs() < 0.01, "{stated} vs {unstated}");
+}
+
+/// Names with "Unicode" in them are proportional faces, not code fonts.
+#[test]
+fn unicode_faces_are_not_monospaced() {
+    for name in ["Arial Unicode MS", "Lucida Sans Unicode"] {
+        assert_eq!(family_of(name), Fam::Sans, "{name}");
+    }
+    for name in ["Courier New", "Consolas", "Fira Code", "Source Code Pro"] {
+        assert_eq!(family_of(name), Fam::Mono, "{name}");
+    }
+}
+
+/// A long shared string referenced by many cells is copied into each: past a cap on a sheet's
+/// cell text, the rest is left out and reported instead of exhausting memory.
+#[test]
+fn cell_text_is_capped_per_sheet() {
+    let long = "x".repeat(100_000);
+    let rows: String = (1..=1000).map(|r| format!(r#"<row r="{r}"><c r="A{r}" t="s"><v>0</v></c></row>"#)).collect();
+    let sheet = format!("<sheetData>{rows}</sheetData>");
+    let (_, report) = from_office("big.xlsx", &xlsx_full(&sheet, &[], "", "0", Some(&format!("<si><t>{long}</t></si>")))).unwrap();
+    assert!(report.notes.iter().any(|n| n.contains("cell text")), "{report:?}");
 }

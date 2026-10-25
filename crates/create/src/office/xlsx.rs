@@ -20,6 +20,8 @@ use super::{Notes, RunStyle, family_of, hex_color};
 const MAX_CELLS: usize = 2_000_000;
 /// Most merged ranges read from one sheet.
 const MAX_MERGES: usize = 20_000;
+/// Most cell text a sheet keeps, in bytes.
+const MAX_TEXT_BYTES: usize = 64 << 20;
 const MAX_COL: u32 = 16_384;
 const MAX_ROW: u32 = 1_048_576;
 /// Longest number format read, in characters: Excel's own limit. Every cell re-reads its format,
@@ -762,6 +764,14 @@ fn col_points(chars: f64) -> f64 {
     px * 0.75
 }
 
+/// A stored column width (`<col width>`, `defaultColWidth`) in points. Stored widths already
+/// include the 5 px of padding (ECMA-376 Part 1, §18.3.1.13): pixels are
+/// `trunc((256·width + trunc(128/7)) / 256 · 7)`.
+fn stored_col_points(width: f64) -> f64 {
+    let px = ((256.0 * width + 18.0) / 256.0 * 7.0).trunc().max(0.0);
+    px * 0.75
+}
+
 struct Sheet {
     cells: BTreeMap<(u32, u32), Cell>,
     widths: HashMap<u32, f64>,
@@ -787,7 +797,7 @@ fn read_sheet(zip: &Zip<'_>, part: &str, shared: &[String], styles: &Styles, dat
     let root = d.root_element();
     let fmt = child(root, "sheetFormatPr");
     let base = fmt.and_then(|f| attr_f64(f, "baseColWidth")).unwrap_or(8.0);
-    let default_w = fmt.and_then(|f| attr_f64(f, "defaultColWidth")).map_or(col_points(base + 0.43), col_points);
+    let default_w = fmt.and_then(|f| attr_f64(f, "defaultColWidth")).map_or(col_points(base + 0.43), stored_col_points);
     let default_h = fmt.and_then(|f| attr_f64(f, "defaultRowHeight")).unwrap_or(15.0).clamp(1.0, 409.0);
     let mut sh = Sheet {
         cells: BTreeMap::new(),
@@ -824,7 +834,7 @@ fn read_sheet(zip: &Zip<'_>, part: &str, shared: &[String], styles: &Styles, dat
             let (Some(min), Some(max)) = (attr_f64(c, "min"), attr_f64(c, "max")) else { continue };
             let (min, max) = (min.clamp(1.0, f64::from(MAX_COL)) as u32, max.clamp(1.0, f64::from(MAX_COL)) as u32);
             let hidden = flag(attr(c, "hidden")) && attr(c, "hidden").is_some();
-            let w = attr_f64(c, "width").map(col_points);
+            let w = attr_f64(c, "width").map(stored_col_points);
             for col in min..=max.min(min.saturating_add(4096)) {
                 if hidden {
                     sh.hidden_cols.insert(col);
@@ -836,6 +846,7 @@ fn read_sheet(zip: &Zip<'_>, part: &str, shared: &[String], styles: &Styles, dat
     }
     let mut count = 0usize;
     let mut next_row = 1u32;
+    let mut text_bytes = 0usize;
     if let Some(data) = child(root, "sheetData") {
         for row in children(data, "row") {
             let r = attr_f64(row, "r").map_or(next_row, |v| v.clamp(1.0, f64::from(MAX_ROW)) as u32);
@@ -887,6 +898,13 @@ fn read_sheet(zip: &Zip<'_>, part: &str, shared: &[String], styles: &Styles, dat
                             cell.numeric = true;
                         }
                     }
+                }
+                // A shared string is copied into every cell that uses it, so one long string used
+                // by many cells could exhaust memory: past the cap, cell text is left out.
+                text_bytes = text_bytes.saturating_add(cell.text.len());
+                if text_bytes > MAX_TEXT_BYTES {
+                    notes.add("cell text beyond 64 MiB in a sheet, left out");
+                    cell.text.clear();
                 }
                 let styled = styles.xfs.get(xf).is_some_and(|x| x.fill > 0 || x.border > 0);
                 if !cell.text.is_empty() || styled {
@@ -1129,7 +1147,8 @@ fn draw_sheet(canvas: &mut Canvas, sh: &Sheet, styles: &Styles, notes: &mut Note
                 Some("center") => y + h / 2.0 + block / 2.0,
                 _ => y + block + 1.0,
             };
-            let align = xf.h_align.clone().unwrap_or_else(|| {
+            // "general" is the default, written out by LibreOffice and others.
+            let align = xf.h_align.clone().filter(|a| a != "general" && !a.is_empty()).unwrap_or_else(|| {
                 if cell.numeric {
                     "right".into()
                 } else if cell.boolean {

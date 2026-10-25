@@ -777,15 +777,18 @@ fn text_body(
 ) {
     // The list style chain: master text styles, master and layout placeholders, the shape's own.
     let ph = placeholder(sp);
+    // Date, footer, slide number and header placeholders use the master's other-text style.
     let mut levels = match ph.as_ref().map(|(t, _)| ph_kind(t)) {
         Some("title") => inh.title.clone(),
+        Some("dt" | "ftr" | "sldNum" | "hdr") | None => inh.other.clone(),
         Some(_) => inh.body.clone(),
-        None => inh.other.clone(),
     };
     let mut body_props: Vec<Node<'_, '_>> = Vec::new();
     if let Some((ty, idx)) = &ph {
-        for tree in [inh.master_ph, inh.layout_ph] {
-            if let Some(m) = tree.find(ty, idx.as_deref()).and_then(|s| child(s, "txBody")) {
+        // A slide placeholder finds its layout's by index, but the layout's finds the master's by
+        // type: the master's index 2 is its date, not a second content placeholder.
+        for (tree, idx) in [(inh.master_ph, None), (inh.layout_ph, idx.as_deref())] {
+            if let Some(m) = tree.find(ty, idx).and_then(|s| child(s, "txBody")) {
                 if let Some(ls) = child(m, "lstStyle") {
                     levels.merge(&Levels::parse(ls, c));
                 }
@@ -992,9 +995,9 @@ fn shapes(
         let own = sppr.and_then(|p| child(p, "xfrm")).or_else(|| child(e, "xfrm")).and_then(frame_of);
         let frame = own.or_else(|| {
             let (ty, idx) = ph.as_ref()?;
-            [inh.layout_ph, inh.master_ph]
+            [(inh.layout_ph, idx.as_deref()), (inh.master_ph, None)]
                 .into_iter()
-                .find_map(|t| t.find(ty, idx.as_deref()).and_then(|s| child(s, "spPr")).and_then(|p| child(p, "xfrm")).and_then(frame_of))
+                .find_map(|(t, idx)| t.find(ty, idx).and_then(|s| child(s, "spPr")).and_then(|p| child(p, "xfrm")).and_then(frame_of))
         });
         match name {
             "grpSp" => {
@@ -1241,7 +1244,15 @@ fn cell_text(
         }
         let mut items = Vec::new();
         let mut base = None;
-        for r in children(p, "r") {
+        for r in p.children().filter(Node::is_element) {
+            let name = r.tag_name().name();
+            if name == "br" {
+                items.push(Inline::Break);
+                continue;
+            }
+            if name != "r" && name != "fld" {
+                continue;
+            }
             let mut rl = style.clone();
             // A colour on the run itself wins over the table style's, which wins over the
             // inherited text colour.
@@ -1259,9 +1270,13 @@ fn cell_text(
                 underline: rl.underline.unwrap_or(false),
                 ..RunStyle::default()
             };
-            let t = cx.notes.drawable(&xml::text_of(r, "t"));
             base.get_or_insert_with(|| rs.clone());
-            items.push(Inline::Text(t, rs));
+            if name == "fld" && attr(r, "type") == Some("slidenum") {
+                items.push(Inline::Field(Field::Page, rs));
+            } else {
+                let t = cx.notes.drawable(&xml::text_of(r, "t"));
+                items.push(Inline::Text(t, rs));
+            }
         }
         let base = base.unwrap_or(RunStyle { size: fin(style.size.unwrap_or(18.0), 18.0).clamp(1.0, 400.0), ..RunStyle::default() });
         out.push(flow::layout(&Para { items, align: style.algn.unwrap_or(Align::Left), base, ..Para::default() }, width, (cx.slide_no, cx.slides)));

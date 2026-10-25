@@ -135,7 +135,21 @@ pub(crate) enum Fam {
 /// everything else (Calibri, Arial, Aptos, Segoe…) Helvetica.
 pub(crate) fn family_of(name: &str) -> Fam {
     let n = name.to_ascii_lowercase();
-    const MONO: [&str; 9] = ["courier", "consolas", "mono", "menlo", "lucida console", "code", "typewriter", "fixedsys", "terminal"];
+    // Code faces by name ("Fira Code", "Source Code Pro"): a bare "code" would match "Unicode".
+    const MONO: [&str; 12] = [
+        "courier",
+        "consolas",
+        "mono",
+        "menlo",
+        "lucida console",
+        "source code",
+        "fira code",
+        "cascadia code",
+        "typewriter",
+        "fixedsys",
+        "terminal",
+        "code new roman",
+    ];
     const SERIF: [&str; 16] = [
         "times",
         "georgia",
