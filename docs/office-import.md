@@ -1,6 +1,6 @@
 # Word, PowerPoint and Excel to PDF
 
-> **Status:** M10 candidate, native import of Office Open XML · **Revision history:** 2026-10-14 first version; 2026-10-16 #2871 workflow completion and reporting; 2026-10-22 Turkish and Central European letters drawn, UI notices translated and shown only when something was approximated.
+> **Status:** M10 candidate, native import of Office Open XML · **Revision history:** 2026-10-14 first version; 2026-10-16 #2871 workflow completion and reporting; 2026-10-22 Turkish and Central European letters drawn, UI notices translated and shown only when something was approximated; 2026-10-25 review fixes (Word 2010 text boxes, nested boxes, master placeholders, merged table cells, stored column widths) and the known gaps listed.
 
 PdfCraft opens Word (`.docx`, `.docm`, `.dotx`), PowerPoint (`.pptx`, `.pptm`, `.ppsx`, `.potx`) and
 Excel (`.xlsx`, `.xlsm`, `.xltx`) files as new, unsaved PDFs. The conversion is native Rust in
@@ -87,6 +87,20 @@ states the standard-font substitution. Nothing in the source is changed.
   horizontally; text boxes in Word join the text flow after their paragraph; multi-column
   sections are set in one column; Excel charts and pictures, chart sheets, headers and footers,
   and print areas are not used.
+- **Known gaps, not yet handled** (layout differs from Office's; nothing is lost):
+  - Word: right, centre and decimal tab stops are set as left stops, so a "title ⇥ page" line in a
+    table of contents or footer can wrap; dot leaders are not drawn; a table style's paragraph
+    spacing and banded shading are not applied to its cells; tables in headers and footers are
+    set as one line per row; a picture's crop (`srcRect`) is ignored, so a cropped picture is
+    squeezed; paragraph borders (`pBdr`) and paragraph shading inside table cells are not drawn.
+  - PowerPoint: transparency (`alpha`) is ignored, so a translucent overlay is drawn opaque;
+    curved and bent connectors are drawn as boxes; Wingdings bullets show as the letters they are
+    stored as; text in a flipped shape is flipped with it; placeholders inherit no fill or
+    outline from the layout or master.
+  - Excel: a number that just fits its column in Calibri can be shown as `####`, as Helvetica is
+    wider; General numbers aren't shortened to fit; outside borders of merged ranges and their
+    wrap width come from the first cell only; rows without a stated height aren't grown for
+    large fonts; ISO date cells (`t="d"`) are left empty.
 - **Not supported:** password-protected files and the legacy binary formats (`.doc`, `.ppt`,
   `.xls`) — they are refused with a message saying so — and OpenDocument files.
 
@@ -94,7 +108,8 @@ states the standard-font substitution. Nothing in the source is changed.
 
 Packages are untrusted input. The zip reader accepts only stored or deflated parts, refuses zip64
 and encryption, caps each part at 128 MiB and a package at 512 MiB decompressed, and never
-inflates past a part's declared size. XML is parsed with DTDs disallowed and a node limit. Style
+inflates past a part's declared size, counting what a failed part inflated. A sheet keeps at most
+64 MiB of cell text (the rest is left out and reported). XML is parsed with DTDs disallowed and a node limit. Style
 chains, nesting, table spans, counts and every number read from the file are bounded, so a
 hostile file is refused or approximated, never a crash. Conversion runs under the engine's panic
 guard and, in the desktop app, off the UI thread. Macros (`vbaProject.bin`) are never read.
