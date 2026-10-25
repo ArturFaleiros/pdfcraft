@@ -156,7 +156,7 @@ pub(crate) fn family_of(name: &str) -> Fam {
     ];
     if MONO.iter().any(|m| n.contains(m)) {
         Fam::Mono
-    } else if SERIF.iter().any(|s| n.contains(s)) && !n.contains("sans") {
+    } else if SERIF.iter().any(|s| n.contains(s)) && !n.contains("sans") && !n.contains("gothic") {
         Fam::Serif
     } else {
         Fam::Sans

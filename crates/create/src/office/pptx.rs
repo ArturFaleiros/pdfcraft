@@ -1154,11 +1154,18 @@ fn table(cx: &mut Cx<'_, '_>, page: &mut Page, tbl: Node<'_, '_>, (x, ytop, w, _
         let mut cells = Vec::new();
         let mut g = 0usize;
         for tc in children(tr, "tc") {
+            // A row has one cell per grid column: a cell spanning columns is followed by `hMerge`
+            // placeholders for the rest, so each cell moves the cursor by one column, and a
+            // placeholder draws nothing (the spanning cell covers it).
+            let col = g;
+            g = g.saturating_add(1);
+            if flag(attr(tc, "hMerge")) && attr(tc, "hMerge").is_some() {
+                continue;
+            }
             let span = attr_f64(tc, "gridSpan").map_or(1, |v| v.clamp(1.0, 64.0) as usize);
-            let merged = flag(attr(tc, "hMerge")) && attr(tc, "hMerge").is_some() || flag(attr(tc, "vMerge")) && attr(tc, "vMerge").is_some();
-            let x1 = edges.get(g).copied().unwrap_or(0.0);
-            let x2 = edges.get((g + span).min(ncols)).copied().unwrap_or(w);
-            g += span;
+            let merged = flag(attr(tc, "vMerge")) && attr(tc, "vMerge").is_some();
+            let x1 = edges.get(col).copied().unwrap_or(0.0);
+            let x2 = edges.get(col.saturating_add(span).min(ncols)).copied().unwrap_or(w);
             let pr = child(tc, "tcPr");
             let mar = |k: &str, d: f64| pr.and_then(|p| attr_f64(p, k)).map_or(d, |v| v / EMU);
             let fill = pr.and_then(|p| child(p, "solidFill")).and_then(|f| color_in(f, c, None)).or(if header {

@@ -9068,6 +9068,10 @@ fn docx_open_insert_combine_and_root_confinement() {
     let converted = opened["doc"].as_u64().unwrap();
     assert!(a.call("doc_save", &json!({ "doc": converted })).is_err(), "Save requires a PDF destination");
     ok(&mut a, "doc_save", json!({ "doc": converted, "path": "converted.pdf" }));
+    // Saving the converted PDF over the Word file it came from would replace it with PDF bytes.
+    let over = a.call("doc_save", &json!({ "doc": converted, "path": "report.docx" }));
+    assert!(matches!(&over, Err(e) if e.to_string().contains("Office")), "{over:?}");
+    assert_eq!(std::fs::read(dir.join("report.docx")).unwrap(), original, "the Word file is untouched");
     let inserted = ok(&mut a, "page_insert_file", json!({ "doc": base, "path": "report.docx", "pages": [2], "at": 1 }));
     assert!(inserted["office"]["notice"].as_str().unwrap().contains("layout may differ"));
     assert_eq!(page_text(&mut a, base).len(), 4);

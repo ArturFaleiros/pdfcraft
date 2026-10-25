@@ -821,3 +821,35 @@ fn a_damaged_slide_is_left_out_reported_and_not_counted() {
     let pg = pages(&doc);
     assert!(content(&doc, &pg[1]).contains("(2)"), "{}", content(&doc, &pg[1]));
 }
+
+/// Gothic faces are sans-serif even when their names hold a serif word ("Century", "Book").
+#[test]
+fn gothic_faces_are_sans_serif() {
+    for name in ["Century Gothic", "Franklin Gothic Book", "MS Gothic", "Arial"] {
+        assert_eq!(family_of(name), Fam::Sans, "{name}");
+    }
+    for name in ["Century Schoolbook", "Book Antiqua", "Times New Roman"] {
+        assert_eq!(family_of(name), Fam::Serif, "{name}");
+    }
+}
+
+/// A cell spanning two grid columns is followed by an `hMerge` placeholder for the second: the
+/// cell after it starts at the third column, and the placeholder draws nothing.
+#[test]
+fn merged_table_cells_keep_later_cells_in_their_columns() {
+    let cell =
+        |attrs: &str, text: &str| format!(r#"<a:tc{attrs}><a:txBody><a:bodyPr/><a:p><a:r><a:t>{text}</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc>"#);
+    let row = format!("{}{}{}", cell(r#" gridSpan="2""#, "Junto"), cell(r#" hMerge="1""#, "Oculto"), cell("", "C3"));
+    let table = format!(
+        r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="10" name="Table"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x="0" y="0"/><a:ext cx="2743200" cy="370840"/></p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table"><a:tbl><a:tblGrid><a:gridCol w="914400"/><a:gridCol w="914400"/><a:gridCol w="914400"/></a:tblGrid><a:tr h="370840">{row}</a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>"#
+    );
+    let (doc, _) = from_office("t.pptx", &pptx(&[&table], &[])).unwrap();
+    let doc = reopen(&doc);
+    let text = content(&doc, &pages(&doc)[0]);
+    assert!(!text.contains("(Oculto)"), "the placeholder's own text isn't drawn");
+    let at = text.find("(C3)").unwrap_or_else(|| panic!("the third cell's text: {text}"));
+    let tm = text[..at].rfind(" Tm").unwrap();
+    let x: f64 = text[..tm].split_whitespace().rev().nth(1).unwrap().parse().unwrap();
+    // The third column starts 144 pt in; its text sits just inside it, on one line.
+    assert!((144.0..160.0).contains(&x), "x = {x}\n{text}");
+}
