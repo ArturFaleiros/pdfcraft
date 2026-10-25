@@ -22,6 +22,8 @@ const MAX_CELLS: usize = 2_000_000;
 const MAX_MERGES: usize = 20_000;
 /// Most cell text a sheet keeps, in bytes.
 const MAX_TEXT_BYTES: usize = 64 << 20;
+/// Most merge comparisons a sheet's pages make when finding the merge each cell is in.
+const MAX_MERGE_WORK: usize = 100_000_000;
 const MAX_COL: u32 = 16_384;
 const MAX_ROW: u32 = 1_048_576;
 /// Longest number format read, in characters: Excel's own limit. Every cell re-reads its format,
@@ -1054,12 +1056,23 @@ fn draw_sheet(canvas: &mut Canvas, sh: &Sheet, styles: &Styles, notes: &mut Note
     // wide columns, tall rows) has billions of empty ones. Ordered down, then over.
     let band_of = |bands: &[(u32, u32)], i: u32| bands.partition_point(|(_, end)| *end < i);
     let pages: BTreeSet<(usize, usize)> = sh.cells.keys().map(|(r, c)| (band_of(&col_bands, *c), band_of(&row_bands, *r))).collect();
+    // Each lookup scans the page's merges; past this many comparisons on a sheet, the rest of its
+    // cells are drawn unmerged (and that is reported) rather than scanning on.
+    let merge_work = std::cell::Cell::new(MAX_MERGE_WORK);
+    let merge_cut = std::cell::Cell::new(false);
     for (ci, ri) in pages {
         let (Some((c0, c1)), Some((r0, r1))) = (col_bands.get(ci), row_bands.get(ri)) else { continue };
         // Only the merges that touch this page are searched for each of its cells.
         let merges: Vec<(u32, u32, u32, u32)> =
             sh.merges.iter().copied().filter(|(mr1, mc1, mr2, mc2)| *mr1 <= *r1 && *mr2 >= *r0 && *mc1 <= *c1 && *mc2 >= *c0).collect();
-        let merged_at = |r: u32, c: u32| merges.iter().find(|(r1, c1, r2, c2)| (*r1..=*r2).contains(&r) && (*c1..=*c2).contains(&c)).copied();
+        let merged_at = |r: u32, c: u32| {
+            let Some(left) = merge_work.get().checked_sub(merges.len()) else {
+                merge_cut.set(true);
+                return None;
+            };
+            merge_work.set(left);
+            merges.iter().find(|(r1, c1, r2, c2)| (*r1..=*r2).contains(&r) && (*c1..=*c2).contains(&c)).copied()
+        };
         let pi = canvas.new_page(pw, ph)?;
         let Some(page) = canvas.page(pi) else { continue };
         // Scale about the printable area's top-left corner.
@@ -1209,6 +1222,9 @@ fn draw_sheet(canvas: &mut Canvas, sh: &Sheet, styles: &Styles, notes: &mut Note
             }
         }
         page.restore();
+    }
+    if merge_cut.get() {
+        notes.add("merged ranges on very dense pages, drawn unmerged");
     }
     Ok(())
 }

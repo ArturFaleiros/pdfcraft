@@ -3263,9 +3263,13 @@ pub struct OpenContext {
 pub type Converted = (SourceKind, Arc<Vec<u8>>, Option<OfficeReport>);
 
 fn office_pdf(now: Option<i64>, name: &str, bytes: &[u8]) -> Result<(Arc<Vec<u8>>, OfficeReport), EditError> {
-    // The importer reads untrusted packages: a panic in it must not take the app down.
-    let (doc, report) =
-        guard(|| pdfcraft_create::from_office(name, bytes)).map_err(|_| EditError::Source(format!("{name}: the file could not be read")))??;
+    // The importer reads untrusted packages, and the document it builds is written, reopened and
+    // rendered here: a panic anywhere in that must not take the app down.
+    guard(|| office_pdf_unguarded(now, name, bytes)).map_err(|_| EditError::Source(format!("{name}: the file could not be read")))?
+}
+
+fn office_pdf_unguarded(now: Option<i64>, name: &str, bytes: &[u8]) -> Result<(Arc<Vec<u8>>, OfficeReport), EditError> {
+    let (doc, report) = pdfcraft_create::from_office(name, bytes)?;
     let opts = SaveOptions { mod_date: now.map(pdfcraft_cos::pdf_date), ..SaveOptions::default() };
     let pdf = write_full(&doc, &opts).map(Arc::new).map_err(|e| EditError::Write(e.to_string()))?;
     // Checked like every new file (`Session::write_new`) before anyone writes or opens it: it

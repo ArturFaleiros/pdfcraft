@@ -1009,3 +1009,19 @@ fn cell_text_is_capped_per_sheet() {
     let (_, report) = from_office("big.xlsx", &xlsx_full(&sheet, &[], "", "0", Some(&format!("<si><t>{long}</t></si>")))).unwrap();
     assert!(report.notes.iter().any(|n| n.contains("cell text")), "{report:?}");
 }
+
+/// Finding the merge a cell is in is bounded: a page dense with tiny rows and merges stops
+/// looking past a budget, draws the rest unmerged and says so, instead of scanning every merge
+/// for every cell.
+#[test]
+fn merge_lookups_on_a_dense_page_are_bounded() {
+    let rows: String = (1..=20_000)
+        .map(|r| format!(r#"<row r="{r}" ht="0.1" customHeight="1"><c r="A{r}" t="inlineStr"><is><t>a</t></is></c><c r="C{r}" t="inlineStr"><is><t>c</t></is></c></row>"#))
+        .collect();
+    let merges: String = (1..=20_000).map(|r| format!(r#"<mergeCell ref="A{r}:B{r}"/>"#)).collect();
+    let sheet = format!(r#"<sheetData>{rows}</sheetData><mergeCells count="20000">{merges}</mergeCells>"#);
+    let started = std::time::Instant::now();
+    let (_, report) = from_office("dense.xlsx", &xlsx(&sheet, &[])).unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(20), "{:?}", started.elapsed());
+    assert!(report.notes.iter().any(|n| n.contains("drawn unmerged")), "{report:?}");
+}

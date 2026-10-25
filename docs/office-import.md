@@ -101,6 +101,9 @@ states the standard-font substitution. Nothing in the source is changed.
     wider; General numbers aren't shortened to fit; outside borders of merged ranges and their
     wrap width come from the first cell only; rows without a stated height aren't grown for
     large fonts; ISO date cells (`t="d"`) are left empty.
+  - Desktop app: Create PDF from multiple files converts each file on the UI thread (as it does
+    images and text), so a large Office file pauses the window while it converts; File ▸ Open
+    converts off the UI thread.
 - **Not supported:** password-protected files and the legacy binary formats (`.doc`, `.ppt`,
   `.xls`) — they are refused with a message saying so — and OpenDocument files.
 
