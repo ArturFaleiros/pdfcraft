@@ -70,7 +70,7 @@ fn mixed_harness(options: &'static [(&'static str, &'static str)]) -> Harness<'s
 
 /// A vertical wheel event; negative `dy` scrolls down.
 fn wheel(unit: MouseWheelUnit, dy: f32, phase: TouchPhase) -> egui::Event {
-    egui::Event::MouseWheel { unit, delta: egui::vec2(0.0, dy), phase, modifiers: Modifiers::NONE }
+    egui::Event::MouseWheel { unit, delta: egui::vec2(0.0, dy), phase, modifiers: Modifiers::NONE, source: egui::MouseWheelSource::Unknown }
 }
 
 #[cfg(target_os = "linux")]
@@ -710,7 +710,13 @@ fn frames_after_a_notch(system_reduced: bool, animation_effects: &str, zooming: 
     h.run_steps(2);
     let before = rect(&h, 0).expect("page 1 on screen").min.y;
     let (delta, modifiers) = if zooming { (egui::vec2(0.0, 1.0), Modifiers::COMMAND) } else { (egui::vec2(0.0, -1.0), Modifiers::NONE) };
-    h.event(egui::Event::MouseWheel { unit: MouseWheelUnit::Line, delta, phase: TouchPhase::Move, modifiers });
+    h.event(egui::Event::MouseWheel {
+        unit: MouseWheelUnit::Line,
+        delta,
+        phase: TouchPhase::Move,
+        modifiers,
+        source: egui::MouseWheelSource::Unknown,
+    });
     (0..40)
         .map(|_| {
             h.step();
@@ -1029,7 +1035,7 @@ fn view_menu_page_display_uses_the_same_commands() {
     h.run_steps(4);
     h.get_by_label("Menu").click();
     h.run_steps(2);
-    h.get_by_label("View ⏵").hover();
+    h.get_by_label("View").hover();
     h.run_steps(3);
     h.get_by_label("Single page").click();
     h.run_steps(4);
@@ -2007,15 +2013,15 @@ fn long_view_menu_fits_a_short_window() {
     h.run_steps(8);
     h.get_by_label("Menu").click();
     h.run_steps(2);
-    h.get_by_label("View ⏵").hover();
+    h.get_by_label("View").hover();
     h.run_steps(4);
-    let before = h.get_by_label("Side panels ⏵").rect().bottom();
+    let before = h.get_by_label("Side panels").rect().bottom();
     h.get_by_label("Fit to height ").hover();
     h.event(wheel(MouseWheelUnit::Point, -1000.0, TouchPhase::Move));
     h.run_steps(6);
-    let after = h.get_by_label("Side panels ⏵").rect().bottom();
+    let after = h.get_by_label("Side panels").rect().bottom();
     assert!(after < before && after <= 400.0, "menu did not scroll into view: {before} -> {after}");
-    h.get_by_label("Side panels ⏵").hover();
+    h.get_by_label("Side panels").hover();
     h.run_steps(4);
     h.get_all_by_label("Bookmarks").last().unwrap().click();
     h.run_steps(4);
@@ -2156,4 +2162,102 @@ fn full_screen_clicks_turn_pages_whatever_tool_was_on() {
     h.run_steps(4);
     assert!(!h.state().full_screen);
     assert_eq!(h.state().quick_tool, QuickTool::Hand, "the tool from before is back");
+}
+
+/// #4415: the Pages panel's Page tools menu. Each tool acts on the selected pages (the current
+/// page when none is): rotate, delete and insert a blank page here, as Pages ▸ … does.
+#[test]
+fn the_pages_panel_tools_act_on_the_selected_pages() {
+    let mut h = harness(&[("panel", "pages")]);
+    let id = h.state().views[0].id;
+    let rotations = |h: &Harness<'static, PdfCraftApp>| h.state().session.get(id).unwrap().info.pages.iter().map(|p| p.rotation).collect::<Vec<_>>();
+    // The panel's Page tools menu, on the right-hand side of the window.
+    let tool = |h: &mut Harness<'static, PdfCraftApp>, label: &str| {
+        h.get_all_by_label("Page tools").find(|n| n.rect().left() > 1000.0).expect("Page tools in the Pages panel").click();
+        h.run_steps(2);
+        h.get_by_label(label).click();
+        h.run_steps(3);
+    };
+    h.state_mut().views[0].select_pages(&[1, 2]);
+    h.run_steps(2);
+    tool(&mut h, "Rotate the selected pages clockwise");
+    assert_eq!(rotations(&h), [0, 90, 90], "pages 2 and 3, the selection");
+    tool(&mut h, "Rotate the selected pages counterclockwise");
+    assert_eq!(rotations(&h), [0, 0, 0]);
+    h.state_mut().views[0].select_pages(&[0]);
+    h.run_steps(2);
+    tool(&mut h, "Delete the selected pages");
+    assert_eq!(h.state().session.get(id).unwrap().info.pages.len(), 2, "page 1 deleted");
+    tool(&mut h, "Insert a blank page after the selection");
+    assert_eq!(h.state().session.get(id).unwrap().info.pages.len(), 3);
+    h.state_mut().execute("edit.undo");
+    h.run_steps(2);
+    assert_eq!(h.state().session.get(id).unwrap().info.pages.len(), 2, "each is one undo step");
+}
+
+/// CodeRabbit on #4583: the Page tools menu's file items work from the menu too. Insert pages
+/// from a file puts the picked file's pages after the selection; Extract the selected pages
+/// opens Extract for the selection and writes it.
+#[test]
+fn the_pages_panel_tools_insert_from_a_file_and_extract() {
+    let dir = std::env::temp_dir().join(format!("pdfcraft-page-tools-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let more = dir.join("more.pdf");
+    std::fs::write(&more, PAGES).unwrap();
+    let mut h = harness(&[("panel", "pages")]);
+    let id = h.state().views[0].id;
+    let count = |h: &Harness<'static, PdfCraftApp>| h.state().session.get(id).unwrap().info.pages.len();
+    let tool = |h: &mut Harness<'static, PdfCraftApp>, label: &str| {
+        h.get_all_by_label("Page tools").find(|n| n.rect().left() > 1000.0).expect("Page tools in the Pages panel").click();
+        h.run_steps(2);
+        h.get_by_label(label).click();
+        h.run_steps(3);
+    };
+    assert_eq!(count(&h), 3);
+    h.state_mut().views[0].select_pages(&[0]);
+    h.state_mut().pick_override = Some(vec![more.to_string_lossy().into_owned()]);
+    tool(&mut h, "Insert pages from a file after the selection…");
+    h.run_steps(3);
+    assert_eq!(count(&h), 6, "the picked file's three pages are inserted");
+
+    let out = dir.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    h.state_mut().export_dir_override = Some(out.to_string_lossy().into_owned());
+    h.state_mut().views[0].select_pages(&[1, 2]);
+    tool(&mut h, "Extract the selected pages…");
+    assert_eq!(h.state().dialog, Some(pdfcraft_ui_egui::Dialog::Extract), "Extract opens for the selection");
+    h.state_mut().extract_draft = pdfcraft_ui_egui::ExtractDraft { separate: true, ..Default::default() };
+    h.get_all_by_label("Extract").last().unwrap().click();
+    h.run_steps(3);
+    assert_eq!(std::fs::read_dir(&out).unwrap().count(), 2, "the two selected pages, each a file");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The Pages panel's Page tools are greyed out on a document whose security doesn't allow
+/// page changes: the menu doesn't open, and nothing changes.
+#[test]
+fn the_pages_panel_tools_are_off_without_page_editing_permission() {
+    use egui_kittest::kittest::NodeT;
+    let mut h = harness(&[("panel", "pages")]);
+    {
+        let app = h.state_mut();
+        app.apply_edit(pdfcraft_engine::Edit::Protect(pdfcraft_engine::Protection {
+            permissions_password: Some("owner".into()),
+            changes: pdfcraft_engine::Changes::None,
+            ..Default::default()
+        }));
+        let bytes = app.session.save_bytes(app.views[0].id).unwrap();
+        app.open_bytes("restricted.pdf", None, bytes.as_ref().clone()).unwrap();
+    }
+    h.run_steps(6);
+    let i = h.state().active.unwrap();
+    let id = h.state().views[i].id;
+    assert!(!h.state().session.get(id).unwrap().allows_assembly());
+    let tools = h.get_all_by_label("Page tools").find(|n| n.rect().left() > 1000.0).expect("Page tools");
+    assert!(tools.accesskit_node().is_disabled(), "Page tools is greyed out");
+    tools.click();
+    h.run_steps(3);
+    assert!(h.query_by_label("Delete the selected pages").is_none(), "its menu doesn't open");
+    assert_eq!(h.state().session.get(id).unwrap().info.pages.len(), 3);
 }
