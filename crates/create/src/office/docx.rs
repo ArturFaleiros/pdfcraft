@@ -18,6 +18,10 @@ use super::{Notes, RunStyle, family_of, hex_color};
 /// Deepest nesting of content controls, tables and text boxes followed.
 const MAX_DEPTH: usize = 24;
 
+/// Longest numbering-level text kept, in characters: every paragraph the level numbers copies
+/// it, so a hostile level would otherwise be multiplied by the paragraph count.
+const MAX_LVL_TEXT: usize = 64;
+
 fn twips(v: f64) -> f64 {
     v / 20.0
 }
@@ -453,7 +457,7 @@ fn load_numbering(zip: &Zip<'_>, rels: &Rels) -> Result<Numbering, String> {
             let Some(slot) = levels.get_mut(i) else { continue };
             *slot = Level {
                 format: child(l, "numFmt").and_then(|n| attr(n, "val")).unwrap_or("decimal").to_owned(),
-                text: child(l, "lvlText").and_then(|n| attr(n, "val")).unwrap_or_default().to_owned(),
+                text: child(l, "lvlText").and_then(|n| attr(n, "val")).unwrap_or_default().chars().take(MAX_LVL_TEXT).collect(),
                 start: child(l, "start").and_then(|n| attr_f64(n, "val")).unwrap_or(1.0).clamp(-1e9, 1e9) as i64,
                 p: child(l, "pPr").map(PPr::parse).unwrap_or_default(),
                 r: child(l, "rPr").map(RPr::parse).unwrap_or_default(),
@@ -1325,11 +1329,12 @@ impl Flow<'_> {
                 // On a fresh page each cell places at least one item even if it is taller than
                 // the page (it is cut at the bottom), so a row always moves on.
                 let fresh = self.at_top;
+                // A row's grid positions strictly increase (every span is at least 1), so the
+                // cell below is found by binary search rather than a scan per cell.
                 let next_vmerge = |g: usize| {
-                    t.rows
-                        .get(ri + 1)
-                        .and_then(|nr| nr.cells.iter().zip(grid.get(ri + 1).into_iter().flatten()).find(|(_, ng)| **ng == g))
-                        .is_some_and(|(c, _)| c.vmerge == Some(false))
+                    let below = ri.checked_add(1);
+                    let (Some(nr), Some(ng)) = (below.and_then(|b| t.rows.get(b)), below.and_then(|b| grid.get(b))) else { return false };
+                    ng.binary_search(&g).ok().and_then(|i| nr.cells.get(i)).is_some_and(|c| c.vmerge == Some(false))
                 };
                 let mut done = true;
                 for (ci, cell) in row.cells.iter().enumerate() {

@@ -178,7 +178,8 @@ update the numbers.
 - **Done:** Word, PowerPoint and Excel files (Office Open XML) open as new PDFs natively, with no
   office suite or sidecar, in the desktop app, automation and the web build
   ([office-import.md](office-import.md)); `create.from-office` partial.
-- **Missing:** Word export that keeps layout; Excel and PowerPoint export; Office import with
+- **Missing:** Word export that keeps layout; PowerPoint export that keeps layout (the current one
+  puts each page on a slide with no layout-keeping mode); Excel export; Office import with
   embedded fonts (text is set in the standard 14, so Greek, Cyrillic, CJK and other scripts are
   written as `[U+XXXX]` and line breaks can differ), charts and SmartArt drawn as more than
   outlined boxes (Excel charts are left out), the legacy binary formats and OpenDocument; creating
@@ -187,7 +188,8 @@ update the numbers.
   [#773](https://github.com/storytold/pdfcraft/issues/773) now covers absent inferred borders,
   floating watermark text and per-page section sizes. Exact font matching, vector rules and
   broader layout fidelity remain incomplete;
-  `create.export-xlsx`, `create.export-pptx`, `create.from-html` planned.
+  `create.export-xlsx`, `create.from-html` planned; `create.export-pptx` partial (one slide per
+  page, no layout-keeping mode).
 - **Impact:** "Export PDF" and "Create PDF" are two of Acrobat's most used tools.
 - **Gate:** lossy or missing sub-cases of the convert-and-share workflow (partial, not blocking).
   First beta items: embedded fonts for Office import (10–15 h) and a Word export that keeps layout

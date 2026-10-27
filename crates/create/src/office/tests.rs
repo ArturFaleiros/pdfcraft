@@ -68,6 +68,11 @@ fn size(p: &Dict) -> (f64, f64) {
 // ── Word ────────────────────────────────────────────────────────────────────────────────────
 
 fn docx(body: &str, extra: &[(&str, &[u8])], doc_rels: &[(&str, &str, &str)]) -> Vec<u8> {
+    docx_numbered(body, extra, doc_rels, None)
+}
+
+/// [`docx`] with `numbering` (a whole `numbering.xml`) in place of the standard one when given.
+fn docx_numbered(body: &str, extra: &[(&str, &[u8])], doc_rels: &[(&str, &str, &str)], numbering: Option<&str>) -> Vec<u8> {
     let document = format!(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="{W}" xmlns:r="{R}" xmlns:a="{A}" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body>{body}</w:body></w:document>"#
     );
@@ -78,11 +83,12 @@ fn docx(body: &str, extra: &[(&str, &[u8])], doc_rels: &[(&str, &str, &str)]) ->
         <w:style w:type="table" w:styleId="TableGrid"><w:tblPr><w:tblBorders><w:top w:val="single" w:sz="4"/><w:left w:val="single" w:sz="4"/><w:bottom w:val="single" w:sz="4"/><w:right w:val="single" w:sz="4"/><w:insideH w:val="single" w:sz="4"/><w:insideV w:val="single" w:sz="4"/></w:tblBorders></w:tblPr></w:style>
         <w:style w:type="paragraph" w:styleId="Loop"><w:basedOn w:val="Loop2"/></w:style><w:style w:type="paragraph" w:styleId="Loop2"><w:basedOn w:val="Loop"/></w:style></w:styles>"#
     );
-    let numbering = format!(
+    let standard = format!(
         r#"<w:numbering xmlns:w="{W}"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl><w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="lowerLetter"/><w:lvlText w:val="%2)"/></w:lvl></w:abstractNum>
         <w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="&#xF0B7;"/><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr></w:lvl></w:abstractNum>
         <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num><w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num></w:numbering>"#
     );
+    let numbering = numbering.map_or(standard, str::to_owned);
     let mut r = vec![("rIdS", "styles", "styles.xml"), ("rIdN", "numbering", "numbering.xml")];
     r.extend_from_slice(doc_rels);
     let doc_rels = rels(&r);
@@ -230,6 +236,11 @@ fn pptx(slides: &[&str], hidden: &[bool]) -> Vec<u8> {
 
 /// [`pptx`] with `master_extra` (shapes) added to the slide master's shape tree.
 fn pptx_with_master(slides: &[&str], hidden: &[bool], master_extra: &str) -> Vec<u8> {
+    pptx_full(slides, hidden, master_extra, "")
+}
+
+/// [`pptx_with_master`] with `pres_attrs` (attributes, e.g. ` firstSlideNum="0"`) on `p:presentation`.
+fn pptx_full(slides: &[&str], hidden: &[bool], master_extra: &str, pres_attrs: &str) -> Vec<u8> {
     let theme = format!(
         r#"<a:theme xmlns:a="{A}"><a:themeElements><a:clrScheme name="t"><a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1><a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="44546A"/></a:dk2><a:lt2><a:srgbClr val="E7E6E6"/></a:lt2><a:accent1><a:srgbClr val="4472C4"/></a:accent1></a:clrScheme><a:fontScheme name="f"><a:majorFont><a:latin typeface="Georgia"/></a:majorFont><a:minorFont><a:latin typeface="Arial"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>"#
     );
@@ -261,7 +272,7 @@ fn pptx_with_master(slides: &[&str], hidden: &[bool], master_extra: &str) -> Vec
         ));
     }
     let pres = format!(
-        r#"<p:presentation xmlns:p="{P}" xmlns:a="{A}" xmlns:r="{R}"><p:sldIdLst>{ids}</p:sldIdLst><p:sldSz cx="9144000" cy="6858000"/></p:presentation>"#
+        r#"<p:presentation xmlns:p="{P}" xmlns:a="{A}" xmlns:r="{R}"{pres_attrs}><p:sldIdLst>{ids}</p:sldIdLst><p:sldSz cx="9144000" cy="6858000"/></p:presentation>"#
     );
     let pr: Vec<(&str, &str, &str)> = pres_rels.iter().map(|(id, t)| (id.as_str(), "slide", t.as_str())).collect();
     parts.push(("ppt/presentation.xml".into(), pres.into_bytes()));
@@ -1024,4 +1035,122 @@ fn merge_lookups_on_a_dense_page_are_bounded() {
     let (_, report) = from_office("dense.xlsx", &xlsx(&sheet, &[])).unwrap();
     assert!(started.elapsed() < std::time::Duration::from_secs(20), "{:?}", started.elapsed());
     assert!(report.notes.iter().any(|n| n.contains("drawn unmerged")), "{report:?}");
+}
+
+// ── Regressions found by review: limits, correctness of presets, numbering and columns ──────────
+
+/// A numbering level's text is copied into every paragraph it numbers: it is capped so a hostile
+/// level can't be multiplied by the paragraph count.
+#[test]
+fn long_numbering_text_is_capped() {
+    let numbering = format!(
+        r#"<w:numbering xmlns:w="{W}"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="{}"/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#,
+        "Q".repeat(100_000)
+    );
+    let numbered = r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>item</w:t></w:r></w:p>"#;
+    let body = numbered.repeat(5);
+    let started = std::time::Instant::now();
+    let (doc, _) = from_office("n.docx", &docx_numbered(&body, &[], &[], Some(&numbering))).unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(20), "{:?}", started.elapsed());
+    let drawn = all_text(&reopen(&doc)).matches('Q').count();
+    assert!(drawn <= 5 * 64, "each label is at most 64 characters, but {drawn} were drawn for 5 paragraphs");
+}
+
+/// Looking for the cell below a vertically merged cell must not scan the whole next row for every
+/// cell of this one.
+#[test]
+fn vmerge_lookup_is_not_quadratic() {
+    let row = format!("<w:tr>{}</w:tr>", "<w:tc/>".repeat(240_000));
+    let body = format!("<w:tbl><w:tblPr/>{row}{row}</w:tbl>");
+    let started = std::time::Instant::now();
+    let result = from_office("wide.docx", &docx(&body, &[], &[]));
+    let took = started.elapsed();
+    assert!(result.is_ok(), "{:?}", result.err());
+    assert!(took < std::time::Duration::from_secs(20), "converting took {took:?}");
+}
+
+/// "Monotype" is a foundry, not a code face: only real code faces are monospaced.
+#[test]
+fn monotype_faces_are_not_monospaced() {
+    for name in ["Monotype Corsiva", "Monotype Sorts"] {
+        assert_ne!(family_of(name), Fam::Mono, "{name}");
+    }
+    for name in ["Courier New", "Consolas", "Fira Code"] {
+        assert_eq!(family_of(name), Fam::Mono, "{name}");
+    }
+}
+
+/// A `frame` or `donut` has a hole. Drawn as a filled rectangle or ellipse it hides what is
+/// underneath, so it is either drawn with its hole (even-odd fill) or reported as approximated.
+#[test]
+fn frame_and_donut_are_not_solid() {
+    let under = r#"<p:sp><p:nvSpPr><p:cNvPr id="2" name="Under"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="1000000" y="1000000"/><a:ext cx="2000000" cy="1000000"/></a:xfrm><a:prstGeom prst="rect"/></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:t>Underneath</a:t></a:r></a:p></p:txBody></p:sp>"#;
+    let shape = |id: u32, prst: &str, x: u32| {
+        format!(
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="{id}" name="S{id}"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="{x}" y="500000"/><a:ext cx="3000000" cy="2000000"/></a:xfrm><a:prstGeom prst="{prst}"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></p:spPr></p:sp>"#
+        )
+    };
+    let slide = format!("{under}{}{}", shape(3, "donut", 500_000), shape(4, "frame", 4_500_000));
+    let (doc, report) = from_office("hole.pptx", &pptx(&[&slide], &[])).unwrap();
+    let doc = reopen(&doc);
+    let text = content(&doc, &pages(&doc)[0]);
+    let noted = report.notes.iter().any(|n| n.contains("approximat"));
+    let even_odd = text.contains("f*") || text.contains("B*");
+    assert!(noted || even_odd, "frame and donut are drawn solid without a note or an even-odd fill: {report:?}\n{text}");
+}
+
+fn numbered_slide() -> String {
+    r#"<p:sp><p:nvSpPr><p:cNvPr id="5" name="Number"/><p:cNvSpPr/><p:nvPr><p:ph type="sldNum" idx="12"/></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x="6553200" y="6356350"/><a:ext cx="2133600" cy="365125"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:p><a:fld id="{1}" type="slidenum"><a:t>9</a:t></a:fld></a:p></p:txBody></p:sp>"#
+        .to_owned()
+}
+
+/// Slide numbers follow the deck: they start at `firstSlideNum`, and a hidden slide still has its
+/// number, so the slides after it are not renumbered.
+#[test]
+fn slide_numbers_follow_the_deck() {
+    let slide = numbered_slide();
+    // A: the first slide is numbered 0.
+    let (doc, _) = from_office("a.pptx", &pptx_full(&[&slide], &[], "", r#" firstSlideNum="0""#)).unwrap();
+    let doc = reopen(&doc);
+    let text = content(&doc, &pages(&doc)[0]);
+    assert!(text.contains("(0)"), "firstSlideNum=0 numbers the first slide 0: {text}");
+    // B: slide 2 is hidden; the third slide keeps the number 3.
+    let (doc, _) = from_office("b.pptx", &pptx(&[&slide, &slide, &slide], &[false, true, false])).unwrap();
+    let doc = reopen(&doc);
+    let all = pages(&doc);
+    assert_eq!(all.len(), 2);
+    let second = content(&doc, &all[1]);
+    assert!(second.contains("(3)"), "the slide after a hidden one keeps its number: {second}");
+}
+
+/// Excel's `#,###` shows nothing for zero (the integer part is optional digits only).
+#[test]
+fn accounting_zero_has_no_digit() {
+    let sheet = r#"<sheetData><row r="1"><c r="A1" s="1"><v>0</v></c></row></sheetData>"#;
+    let (doc, _) = from_office("z.xlsx", &xlsx_styled(sheet, &[], "", "#,###")).unwrap();
+    let doc = reopen(&doc);
+    let text = all_text(&doc);
+    assert!(!text.contains("(0)"), "zero under #,### is drawn empty: {text}");
+}
+
+/// Every `<col>` element costs a bounded amount, however many there are.
+#[test]
+fn col_elements_share_a_work_budget() {
+    let cols = r#"<col min="1" max="16384" hidden="1"/>"#.repeat(400_000);
+    let sheet = format!(r#"<cols>{cols}</cols><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>a</t></is></c></row></sheetData>"#);
+    let started = std::time::Instant::now();
+    let _ = from_office("cols.xlsx", &xlsx(&sheet, &[]));
+    let took = started.elapsed();
+    assert!(took < std::time::Duration::from_secs(20), "converting took {took:?}");
+}
+
+/// A column range reaching the last column hides all of it, not only its first 4097 columns.
+#[test]
+fn col_ranges_hide_every_column_they_name() {
+    let sheet = r#"<cols><col min="2" max="16384" hidden="1"/></cols><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Acell</t></is></c><c r="FZZ1" t="inlineStr"><is><t>Farcell</t></is></c></row></sheetData>"#;
+    let (doc, _) = from_office("hide.xlsx", &xlsx(sheet, &[])).unwrap();
+    let doc = reopen(&doc);
+    let text = all_text(&doc);
+    assert!(text.contains("(Acell)"), "{text}");
+    assert!(!text.contains("(Farcell)"), "column FZZ (4628) is inside the hidden range: {text}");
 }

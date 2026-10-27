@@ -25,6 +25,9 @@ const MAX_TEXT_BYTES: usize = 64 << 20;
 /// Most merge comparisons a sheet's pages make when finding the merge each cell is in.
 const MAX_MERGE_WORK: usize = 100_000_000;
 const MAX_COL: u32 = 16_384;
+/// Most columns a sheet's `<col>` ranges name between them: four times the sheet's width, so
+/// overlapping ranges in a valid file still apply in full but repeated ones can't multiply the work.
+const MAX_COL_WORK: u32 = MAX_COL * 4;
 const MAX_ROW: u32 = 1_048_576;
 /// Longest number format read, in characters: Excel's own limit. Every cell re-reads its format,
 /// so this also bounds the padding and placeholders a format can ask for.
@@ -725,9 +728,6 @@ fn format_number(v: f64, code: &str, date1904: bool) -> (String, bool) {
         } else if decimals > 0 && sec.dec_zeros > 0 {
             b.push(dec_sep);
         }
-        if b.is_empty() || b == "-" {
-            b.push('0');
-        }
         if !sec.int_any && sec.int_zeros == 0 && decimals == 0 && !sec.text_at {
             // A format of only literal text (e.g. `"-"` for zero).
             String::new()
@@ -832,12 +832,19 @@ fn read_sheet(zip: &Zip<'_>, part: &str, shared: &[String], styles: &Styles, dat
         sh.margins = [g("top", 54.0), g("right", 50.4), g("bottom", 54.0), g("left", 50.4)];
     }
     if let Some(cols) = child(root, "cols") {
+        let mut budget = MAX_COL_WORK;
         for c in children(cols, "col") {
             let (Some(min), Some(max)) = (attr_f64(c, "min"), attr_f64(c, "max")) else { continue };
             let (min, max) = (min.clamp(1.0, f64::from(MAX_COL)) as u32, max.clamp(1.0, f64::from(MAX_COL)) as u32);
+            let span = max.saturating_sub(min).saturating_add(1);
+            let Some(left) = budget.checked_sub(span) else {
+                notes.add("column ranges naming more than four times a sheet's columns, ignored");
+                break;
+            };
+            budget = left;
             let hidden = flag(attr(c, "hidden")) && attr(c, "hidden").is_some();
             let w = attr_f64(c, "width").map(stored_col_points);
-            for col in min..=max.min(min.saturating_add(4096)) {
+            for col in min..=max {
                 if hidden {
                     sh.hidden_cols.insert(col);
                 } else if let Some(w) = w {

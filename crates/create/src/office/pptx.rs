@@ -21,6 +21,10 @@ const MAX_DEPTH: usize = 24;
 const MAX_SHAPES: usize = 20_000;
 /// The shapes drawn across the whole deck (a master's shapes count again on every slide).
 const MAX_DECK_SHAPES: usize = 500_000;
+/// A `frame`'s border width and a `donut`'s ring width, as fractions of the shape's shorter side:
+/// the presets' default adjust values (12500 and 25000 per 100000). Set adjust values are not read.
+const FRAME_ADJ: f64 = 0.125;
+const DONUT_ADJ: f64 = 0.25;
 
 // ── colours ─────────────────────────────────────────────────────────────────────────────────
 
@@ -480,7 +484,8 @@ impl Space {
     }
 }
 
-fn path_ops(geom: Option<Node<'_, '_>>, w: f64, h: f64, notes: &mut Notes) -> Option<String> {
+/// A shape's outline as path operators, and whether it is filled even-odd (it has a hole).
+fn path_ops(geom: Option<Node<'_, '_>>, w: f64, h: f64, notes: &mut Notes) -> Option<(String, bool)> {
     let (x0, y0) = (0.0, 0.0);
     let geom = geom?;
     if is(geom, "custGeom") {
@@ -506,7 +511,7 @@ fn path_ops(geom: Option<Node<'_, '_>>, w: f64, h: f64, notes: &mut Notes) -> Op
                 }
             }
         }
-        return (!s.is_empty()).then_some(s);
+        return (!s.is_empty()).then_some((s, false));
     }
     let prst = attr(geom, "prst").unwrap_or("rect");
     let (w, h) = (w.max(0.0), h.max(0.0));
@@ -518,41 +523,53 @@ fn path_ops(geom: Option<Node<'_, '_>>, w: f64, h: f64, notes: &mut Notes) -> Op
         s.push_str("h ");
         s
     };
+    // An ellipse centred on (cx, cy), from four Bézier quarters.
+    let oval = |cx: f64, cy: f64, rx: f64, ry: f64| -> String {
+        let k = 0.552_284_75;
+        format!(
+            "{} {} m {} {} {} {} {} {} c {} {} {} {} {} {} c {} {} {} {} {} {} c {} {} {} {} {} {} c h ",
+            n_(cx + rx),
+            n_(-cy),
+            n_(cx + rx),
+            n_(-(cy + ry * k)),
+            n_(cx + rx * k),
+            n_(-(cy + ry)),
+            n_(cx),
+            n_(-(cy + ry)),
+            n_(cx - rx * k),
+            n_(-(cy + ry)),
+            n_(cx - rx),
+            n_(-(cy + ry * k)),
+            n_(cx - rx),
+            n_(-cy),
+            n_(cx - rx),
+            n_(-(cy - ry * k)),
+            n_(cx - rx * k),
+            n_(-(cy - ry)),
+            n_(cx),
+            n_(-(cy - ry)),
+            n_(cx + rx * k),
+            n_(-(cy - ry)),
+            n_(cx + rx),
+            n_(-(cy - ry * k)),
+            n_(cx + rx),
+            n_(-cy),
+        )
+    };
     let m = w.min(h);
-    Some(match prst {
-        "rect" | "flowChartProcess" | "textBox" | "frame" => poly(&[(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)]),
-        "ellipse" | "flowChartConnector" | "donut" => {
-            let (rx, ry, cx, cy) = (w / 2.0, h / 2.0, w / 2.0, h / 2.0);
-            let k = 0.552_284_75;
-            format!(
-                "{} {} m {} {} {} {} {} {} c {} {} {} {} {} {} c {} {} {} {} {} {} c {} {} {} {} {} {} c h ",
-                n_(cx + rx),
-                n_(-cy),
-                n_(cx + rx),
-                n_(-(cy + ry * k)),
-                n_(cx + rx * k),
-                n_(-(cy + ry)),
-                n_(cx),
-                n_(-(cy + ry)),
-                n_(cx - rx * k),
-                n_(-(cy + ry)),
-                n_(cx - rx),
-                n_(-(cy + ry * k)),
-                n_(cx - rx),
-                n_(-cy),
-                n_(cx - rx),
-                n_(-(cy - ry * k)),
-                n_(cx - rx * k),
-                n_(-(cy - ry)),
-                n_(cx),
-                n_(-(cy - ry)),
-                n_(cx + rx * k),
-                n_(-(cy - ry)),
-                n_(cx + rx),
-                n_(-(cy - ry * k)),
-                n_(cx + rx),
-                n_(-cy),
-            )
+    let path = match prst {
+        "rect" | "flowChartProcess" | "textBox" => poly(&[(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)]),
+        "ellipse" | "flowChartConnector" => oval(w / 2.0, h / 2.0, w / 2.0, h / 2.0),
+        // Shapes with a hole: the outline and the hole, filled even-odd.
+        "frame" => {
+            let d = m * FRAME_ADJ;
+            let hole = poly(&[(d, d), (w - d, d), (w - d, h - d), (d, h - d)]);
+            return Some((format!("{}{hole}", poly(&[(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)])), true));
+        }
+        "donut" => {
+            let d = m * DONUT_ADJ;
+            let hole = oval(w / 2.0, h / 2.0, (w / 2.0 - d).max(0.0), (h / 2.0 - d).max(0.0));
+            return Some((format!("{}{hole}", oval(w / 2.0, h / 2.0, w / 2.0, h / 2.0)), true));
         }
         "roundRect" | "flowChartAlternateProcess" => {
             let r = m * 0.166_67;
@@ -642,7 +659,8 @@ fn path_ops(geom: Option<Node<'_, '_>>, w: f64, h: f64, notes: &mut Notes) -> Op
             notes.add("shapes of a kind the importer approximates by their bounding rectangle");
             poly(&[(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)])
         }
-    })
+    };
+    Some((path, false))
 }
 
 /// [`n`] for coordinates already in points.
@@ -1095,20 +1113,21 @@ fn shapes(
                         let is_line = name == "cxnSp" || geom.and_then(|g| attr(g, "prst")).is_some_and(|p| p == "line" || p.contains("Connector"));
                         if st.fill.is_some() || st.image.is_some() || st.line.is_some() {
                             // Without a geometry a shape is its rectangle.
-                            let path =
-                                path_ops(geom, w, h, cx.notes).unwrap_or_else(|| format!("0 0 m {} 0 l {} {} l 0 {} l h ", n(w), n(w), n(-h), n(-h)));
+                            let (path, even_odd) = path_ops(geom, w, h, cx.notes)
+                                .unwrap_or_else(|| (format!("0 0 m {} 0 l {} {} l 0 {} l h ", n(w), n(w), n(-h), n(-h)), false));
+                            let star = if even_odd { "*" } else { "" };
                             if let Some(Some(img)) = st.image {
                                 // A picture fill is clipped to the shape's outline.
-                                page.raw(&format!("q 1 0 0 1 {} {} cm {path}W n 1 0 0 1 {} {} cm\n", n(x), n(ytop), n(-x), n(-ytop)));
+                                page.raw(&format!("q 1 0 0 1 {} {} cm {path}W{star} n 1 0 0 1 {} {} cm\n", n(x), n(ytop), n(-x), n(-ytop)));
                                 page.image(img, x, ytop - h, w, h);
                                 page.restore();
                             }
                             let fill = if is_line { None } else { st.fill };
-                            let op = match (fill, st.line) {
-                                (Some(_), Some(_)) => "B",
-                                (Some(_), None) => "f",
-                                (None, Some(_)) => "S",
-                                (None, None) => "n",
+                            let (op, star) = match (fill, st.line) {
+                                (Some(_), Some(_)) => ("B", star),
+                                (Some(_), None) => ("f", star),
+                                (None, Some(_)) => ("S", ""),
+                                (None, None) => ("n", ""),
                             };
                             let mut s = String::new();
                             if let Some(col) = fill {
@@ -1117,7 +1136,7 @@ fn shapes(
                             if let Some((lw, col)) = st.line {
                                 s.push_str(&format!("{} {} {} RG {} w ", n(col[0]), n(col[1]), n(col[2]), n(lw)));
                             }
-                            page.raw(&format!("q 1 0 0 1 {} {} cm\n{s}{path}{op}\nQ\n", n(x), n(ytop)));
+                            page.raw(&format!("q 1 0 0 1 {} {} cm\n{s}{path}{op}{star}\nQ\n", n(x), n(ytop)));
                         }
                         if let Some(body) = child(e, "txBody") {
                             text_body(cx, page, e, body, (x, ytop, w, h), inh, c, st.font_color);
@@ -1370,29 +1389,33 @@ pub(crate) fn convert(zip: &Zip<'_>, main: &str, doc: &mut Document, notes: &mut
     }
     let default_text = child(root, "defaultTextStyle");
     let mut canvas = Canvas::default();
-    let visible: Vec<usize> = plan
+    // Each slide drawn, with its place among the deck's readable slides: a hidden slide keeps its
+    // place, so the slides after it are not renumbered.
+    let mut readable = 0usize;
+    let visible: Vec<(usize, usize)> = plan
         .iter()
         .enumerate()
-        .filter(|(_, (part, ..))| {
+        .filter_map(|(i, (part, ..))| {
             // A slide that can't be read is left out here, not when drawing, so it isn't counted
             // in the slide numbers either.
             let Some(slide) = texts.get(part).and_then(|t| xml::parse(t).ok()) else {
                 notes.add("slides whose part is missing or damaged, left out");
-                return false;
+                return None;
             };
+            let place = readable;
+            readable = readable.saturating_add(1);
             let shown = attr(slide.root_element(), "show").is_none_or(|v| flag(Some(v)));
             if !shown {
                 notes.add("hidden slides, left out as PowerPoint does when saving a PDF");
             }
-            shown
+            shown.then_some((i, place))
         })
-        .map(|(i, _)| i)
         .collect();
     // Layouts, masters and themes are shared by many slides: each is parsed once, here. Slides are
     // parsed one at a time in the loop, so only one is held at once.
     let mut shared: HashMap<&str, roxmltree::Document<'_>> = HashMap::new();
     // Only the visible slides' parts: a hidden slide is never drawn, so neither is its master.
-    for part in visible.iter().filter_map(|i| plan.get(*i)).flat_map(|(_, _, l, _, m, _, t)| [l, m, t]).flatten() {
+    for part in visible.iter().filter_map(|(i, _)| plan.get(*i)).flat_map(|(_, _, l, _, m, _, t)| [l, m, t]).flatten() {
         if !shared.contains_key(part.as_str())
             && let Some(d) = texts.get(part).and_then(|t| xml::parse(t).ok())
         {
@@ -1403,8 +1426,10 @@ pub(crate) fn convert(zip: &Zip<'_>, main: &str, doc: &mut Document, notes: &mut
     let placeholders: HashMap<&str, Placeholders<'_, '_>> =
         shared.iter().map(|(p, d)| (*p, Placeholders::of(xml::path(d.root_element(), &["cSld", "spTree"])))).collect();
     let none = Placeholders::default();
+    // Slides are numbered from `firstSlideNum`.
+    let first_no = attr_f64(root, "firstSlideNum").map_or(1, |v| fin(v, 1.0).clamp(0.0, 9999.0) as usize);
     let mut cx = Cx { zip, doc, notes, images: HashMap::new(), slide_no: 0, slides: visible.len(), shapes: 0, deck_shapes: 0, cut: false };
-    for (k, i) in visible.iter().enumerate() {
+    for (i, place) in &visible {
         let Some((part, srels, layout, lrels, master, mrels, theme)) = plan.get(*i) else { continue };
         let parsed = |p: &Option<String>| p.as_deref().and_then(|p| shared.get(p));
         let Some(slide) = texts.get(part).and_then(|t| xml::parse(t).ok()) else { continue };
@@ -1438,7 +1463,7 @@ pub(crate) fn convert(zip: &Zip<'_>, main: &str, doc: &mut Document, notes: &mut
             body,
             other,
         };
-        cx.slide_no = k + 1;
+        cx.slide_no = first_no.saturating_add(*place);
         (cx.shapes, cx.cut) = (0, false);
         let pi = canvas.new_page(w, h)?;
         let Some(page) = canvas.page(pi) else { continue };

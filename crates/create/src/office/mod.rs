@@ -168,7 +168,9 @@ pub(crate) fn family_of(name: &str) -> Fam {
         "caslon",
         "liberation serif",
     ];
-    if MONO.iter().any(|m| n.contains(m)) {
+    // "Monotype" is a foundry ("Monotype Corsiva"), not a code face: it is left out of the check.
+    let unfounded = n.replace("monotype", "");
+    if MONO.iter().any(|m| unfounded.contains(m)) {
         Fam::Mono
     } else if SERIF.iter().any(|s| n.contains(s)) && !n.contains("sans") && !n.contains("gothic") {
         Fam::Serif
