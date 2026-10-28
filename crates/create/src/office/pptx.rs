@@ -462,11 +462,13 @@ impl Cx<'_, '_> {
             return *cached;
         }
         let loaded = match self.zip.read(&part) {
-            Ok(Some(bytes)) => crate::image_xobject(self.doc, &part, &bytes).ok().map(|(r, _)| r),
+            Ok(Some(bytes)) => {
+                crate::image_xobject(self.doc, &part, &bytes).ok().map(|(r, _)| r).or_else(|| super::emf::form(self.doc, &bytes, self.notes))
+            }
             _ => None,
         };
         if loaded.is_none() {
-            self.notes.add("images in a format the importer can't draw (EMF, WMF, SVG…), drawn as empty boxes");
+            self.notes.add("images in a format the importer can't draw (WMF, SVG…), drawn as empty boxes");
         }
         self.images.insert(part, loaded);
         loaded

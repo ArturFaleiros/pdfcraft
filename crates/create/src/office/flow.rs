@@ -32,6 +32,51 @@ pub(crate) enum Inline {
     Field(Field, RunStyle),
 }
 
+/// How text lines up at a tab stop.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum TabKind {
+    Left,
+    Center,
+    Right,
+    /// The first `.` of the text after the tab sits at the stop (right-aligned without one).
+    Decimal,
+}
+
+/// A custom tab stop, in points from the text area's left edge, with the character that fills
+/// the gap before it (dot leaders in a table of contents).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TabStop {
+    pub pos: f64,
+    pub kind: TabKind,
+    pub leader: Option<char>,
+}
+
+impl TabStop {
+    pub(crate) fn left(pos: f64) -> Self {
+        TabStop { pos, kind: TabKind::Left, leader: None }
+    }
+}
+
+/// One side of a paragraph's border: its width, colour and distance from the text, in points.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Rule {
+    pub width: f64,
+    pub color: [f64; 3],
+    pub space: f64,
+    pub double: bool,
+}
+
+/// A paragraph's borders. Consecutive paragraphs with the same borders share one box, with
+/// `between` drawn between them.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct ParaBorders {
+    pub top: Option<Rule>,
+    pub bottom: Option<Rule>,
+    pub left: Option<Rule>,
+    pub right: Option<Rule>,
+    pub between: Option<Rule>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Align {
     Left,
@@ -60,14 +105,16 @@ pub(crate) struct Para {
     pub before: f64,
     pub after: f64,
     pub line: LineRule,
-    /// Custom tab stops, in points from the text area's left edge.
-    pub tabs: Vec<f64>,
+    /// Custom tab stops.
+    pub tabs: Vec<TabStop>,
     /// A list number or bullet, drawn at the start of the first line.
     pub label: Option<(String, RunStyle)>,
     /// The paragraph mark's style: the height of an empty paragraph.
     pub base: RunStyle,
     pub page_break_before: bool,
     pub shade: Option<[f64; 3]>,
+    /// Boxed: most paragraphs have none, and a block list holds many paragraphs.
+    pub borders: Option<Box<ParaBorders>>,
     /// Keep on the same page as the next paragraph (headings).
     pub keep_next: bool,
     /// With contextual spacing, the style whose neighbours' spacing between them is dropped.
@@ -90,6 +137,7 @@ impl Default for Para {
             base: RunStyle::default(),
             page_break_before: false,
             shade: None,
+            borders: None,
             keep_next: false,
             contextual: None,
         }
@@ -133,7 +181,8 @@ impl Laid {
 enum Atom {
     Word(Vec<(String, usize)>),
     Space(String, usize),
-    Tab,
+    /// A tab, with the style of the text before it (for its leader).
+    Tab(usize),
     Break,
     Image(Option<ObjRef>, f64, f64),
 }
@@ -184,6 +233,8 @@ fn push_text(out: &mut Vec<Atom>, open: &mut bool, text: &str, si: usize) {
 fn atoms(p: &Para, fields: (usize, usize), styles: &mut Vec<RunStyle>) -> Vec<Atom> {
     let mut out: Vec<Atom> = Vec::new();
     let mut open = false;
+    // The style of the latest text, which a following tab's leader is drawn in.
+    let mut last = 0usize;
     for item in &p.items {
         match item {
             Inline::Text(t, s) => {
@@ -191,6 +242,7 @@ fn atoms(p: &Para, fields: (usize, usize), styles: &mut Vec<RunStyle>) -> Vec<At
                     continue;
                 }
                 let si = style_index(styles, s);
+                last = si;
                 let t = if s.caps { t.to_uppercase() } else { t.clone() };
                 push_text(&mut out, &mut open, &t, si);
             }
@@ -203,7 +255,7 @@ fn atoms(p: &Para, fields: (usize, usize), styles: &mut Vec<RunStyle>) -> Vec<At
                 push_text(&mut out, &mut open, &v.to_string(), si);
             }
             Inline::Tab => {
-                out.push(Atom::Tab);
+                out.push(Atom::Tab(last));
                 open = false;
             }
             Inline::Break => {
@@ -230,11 +282,75 @@ struct Building {
     /// Indices after the last tab: only those move when the line is aligned or justified.
     after_tab: usize,
     forced: bool,
+    /// A right, centre or decimal tab whose text is still being placed (from the tab's x on):
+    /// it is moved into place when the next tab, a line break or the paragraph's end comes.
+    pending: Option<PendingTab>,
+}
+
+struct PendingTab {
+    stop: TabStop,
+    /// Where the tab started, and the first item of the text after it.
+    from: f64,
+    first: usize,
+    /// The style its leader is drawn in.
+    style: usize,
 }
 
 impl Building {
     fn new(start: f64) -> Self {
-        Building { items: Vec::new(), x: start, ink: start, start, spaces: Vec::new(), after_tab: 0, forced: false }
+        Building { items: Vec::new(), x: start, ink: start, start, spaces: Vec::new(), after_tab: 0, forced: false, pending: None }
+    }
+
+    /// Fill `from..to` with `leader` characters, ending a little before `to`.
+    fn leader(&mut self, styles: &[RunStyle], si: usize, c: char, from: f64, to: f64) {
+        let Some(st) = styles.get(si) else { return };
+        let cw = st.width(c.encode_utf8(&mut [0; 4]));
+        if cw <= 0.0 || !(to - from).is_finite() {
+            return;
+        }
+        // A quarter of a character clear of the text on each side, at most a line's worth.
+        let n = ((to - from - cw * 0.5) / cw).floor().clamp(0.0, 2_000.0) as usize;
+        if n == 0 {
+            return;
+        }
+        let x = to - cw * 0.25 - n as f64 * cw;
+        self.items.push((x, Placed::Text(c.to_string().repeat(n), si)));
+    }
+
+    /// Move the text after a pending right, centre or decimal tab into place, and draw its
+    /// leader. Text wider than the room before the stop stays where the tab began.
+    fn resolve_tab(&mut self, styles: &[RunStyle]) {
+        let Some(t) = self.pending.take() else { return };
+        let w = (self.ink - t.from).max(0.0);
+        let anchor = match t.stop.kind {
+            TabKind::Left => 0.0,
+            TabKind::Right => w,
+            TabKind::Center => w / 2.0,
+            TabKind::Decimal => self.decimal_offset(styles, t.first, t.from).unwrap_or(w),
+        };
+        let shift = (t.stop.pos - anchor - t.from).max(0.0);
+        if shift > 0.0 {
+            for (x, _) in self.items.iter_mut().skip(t.first) {
+                *x += shift;
+            }
+            self.x += shift;
+            self.ink += shift;
+        }
+        if let Some(c) = t.stop.leader {
+            self.leader(styles, t.style, c, t.from, t.from + shift);
+        }
+    }
+
+    /// The distance from `from` to the first `.` of the text from item `first` on.
+    fn decimal_offset(&self, styles: &[RunStyle], first: usize, from: f64) -> Option<f64> {
+        self.items.iter().skip(first).find_map(|(x, p)| match p {
+            Placed::Text(t, si) => {
+                let at = t.find('.')?;
+                let st = styles.get(*si)?;
+                Some(x + st.width(t.get(..at)?) - from)
+            }
+            Placed::Image(..) => None,
+        })
     }
 
     fn has_ink(&self) -> bool {
@@ -252,11 +368,12 @@ pub(crate) fn layout(p: &Para, width: f64, fields: (usize, usize)) -> Laid {
     let right_edge = (width - fin(p.right, 0.0).clamp(-width, width)).max(left + 10.0);
     let first_start = (left + fin(p.first, 0.0)).clamp(-width, right_edge - 5.0);
     // Tab stops: custom ones, a hanging indent's left edge, then every half inch.
-    let mut stops: Vec<f64> = p.tabs.iter().copied().filter(|t| t.is_finite()).collect();
-    if p.first < 0.0 {
-        stops.push(left);
+    let mut stops: Vec<TabStop> = p.tabs.iter().copied().filter(|t| t.pos.is_finite()).collect();
+    if p.first < 0.0 && !stops.iter().any(|t| (t.pos - left).abs() < 0.5) {
+        stops.push(TabStop::left(left));
     }
-    stops.sort_by(f64::total_cmp);
+    stops.sort_by(|a, b| a.pos.total_cmp(&b.pos));
+    let default_stop = |x: f64| TabStop::left(((x / DEFAULT_TAB).floor() + 1.0) * DEFAULT_TAB);
 
     let mut lines: Vec<Building> = Vec::new();
     let mut cur = Building::new(first_start);
@@ -267,7 +384,7 @@ pub(crate) fn layout(p: &Para, width: f64, fields: (usize, usize)) -> Laid {
         cur.x += w;
         cur.ink = cur.x;
         // The text after a list label starts at the next tab stop (the hanging indent).
-        let next = stops.iter().copied().find(|t| *t > cur.x + 1.0).unwrap_or_else(|| ((cur.x / DEFAULT_TAB).floor() + 1.0) * DEFAULT_TAB);
+        let next = stops.iter().map(|t| t.pos).find(|t| *t > cur.x + 1.0).unwrap_or_else(|| default_stop(cur.x).pos);
         cur.x = if next <= right_edge { next } else { cur.x + st.width(" ") };
         cur.after_tab = cur.items.len();
     }
@@ -283,7 +400,10 @@ pub(crate) fn layout(p: &Para, width: f64, fields: (usize, usize)) -> Laid {
             break;
         }
         match atom {
-            Atom::Break => new_line(&mut lines, &mut cur, true),
+            Atom::Break => {
+                cur.resolve_tab(&styles);
+                new_line(&mut lines, &mut cur, true);
+            }
             Atom::Space(s, si) => {
                 let Some(st) = styles.get(si) else { continue };
                 let w = st.width(&s);
@@ -291,13 +411,21 @@ pub(crate) fn layout(p: &Para, width: f64, fields: (usize, usize)) -> Laid {
                 cur.items.push((cur.x, Placed::Text(s, si)));
                 cur.x += w;
             }
-            Atom::Tab => {
-                let next = stops.iter().copied().find(|t| *t > cur.x + 0.5).unwrap_or_else(|| ((cur.x / DEFAULT_TAB).floor() + 1.0) * DEFAULT_TAB);
-                if next > right_edge {
+            Atom::Tab(si) => {
+                cur.resolve_tab(&styles);
+                let next = stops.iter().copied().find(|t| t.pos > cur.x + 0.5).unwrap_or_else(|| default_stop(cur.x));
+                if next.kind == TabKind::Left && next.pos > right_edge {
                     // Past the right edge a tab moves to the next line, as Word does.
                     new_line(&mut lines, &mut cur, false);
+                } else if next.kind == TabKind::Left {
+                    if let Some(c) = next.leader {
+                        let from = cur.x;
+                        cur.leader(&styles, si, c, from, next.pos);
+                    }
+                    cur.x = next.pos;
                 } else {
-                    cur.x = next;
+                    // The text that follows is placed from here and moved to the stop later.
+                    cur.pending = Some(PendingTab { stop: next, from: cur.x, first: cur.items.len(), style: si });
                 }
                 cur.after_tab = cur.items.len();
                 cur.spaces.clear();
@@ -359,6 +487,7 @@ pub(crate) fn layout(p: &Para, width: f64, fields: (usize, usize)) -> Laid {
             }
         }
     }
+    cur.resolve_tab(&styles);
     cur.forced = true;
     lines.push(cur);
 
@@ -559,6 +688,30 @@ mod tests {
         assert_eq!(xs[0], 18.0, "the label sits at the hanging indent");
         assert_eq!(xs[1], 36.0, "text starts at the left indent");
         assert_eq!(texts(&laid.lines[1]), "c");
+    }
+
+    #[test]
+    fn right_tabs_move_their_text_to_the_stop_and_draw_leaders() {
+        let s = RunStyle::default();
+        let p = Para {
+            items: vec![Inline::Text("Title".into(), s.clone()), Inline::Tab, Inline::Text("9".into(), s.clone())],
+            tabs: vec![TabStop { pos: 300.0, kind: TabKind::Right, leader: Some('.') }],
+            ..Para::default()
+        };
+        let laid = layout(&p, 400.0, (1, 1));
+        assert_eq!(laid.lines.len(), 1);
+        let line = &laid.lines[0];
+        let (x, _) = line.items.iter().find(|(_, p)| matches!(p, Placed::Text(t, _) if t == "9")).unwrap();
+        assert!((x + s.width("9") - 300.0).abs() < 1e-6, "{x}");
+        assert!(line.items.iter().any(|(_, p)| matches!(p, Placed::Text(t, _) if t.starts_with("..."))));
+        // Text too wide for the room before the stop stays after the tab.
+        let p = Para {
+            items: vec![Inline::Tab, Inline::Text("W".repeat(40), s.clone())],
+            tabs: vec![TabStop { pos: 20.0, kind: TabKind::Right, leader: None }],
+            ..Para::default()
+        };
+        let laid = layout(&p, 400.0, (1, 1));
+        assert!(laid.lines[0].items.iter().all(|(x, _)| *x >= 0.0));
     }
 
     #[test]

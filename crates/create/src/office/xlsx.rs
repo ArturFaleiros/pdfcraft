@@ -1,8 +1,12 @@
-//! Excel (SpreadsheetML, ECMA-376 Part 1 §18) to PDF. Each visible sheet's used range is printed
-//! the way Excel prints it by default: at 100 %, columns and rows at their widths and heights,
-//! pages ordered down then across, gridlines only when the sheet asks for them. Cell values are
-//! formatted with their number formats (dates, currency, percentages…), and fonts, fills,
-//! borders, alignment, wrapping and merged cells are kept. Formulas show their cached results.
+//! Excel (SpreadsheetML, ECMA-376 Part 1 §18) to PDF. Each visible sheet is printed the way its
+//! page setup asks: its print areas (or used range, pictures included) at its scale or fitted,
+//! columns and rows at their widths and heights, pages ordered down then across (or across then
+//! down) with manual breaks, print titles repeated, centred if asked, gridlines only when the
+//! sheet asks for them, and headers and footers ([`super::xlsx_hf`]). Cell values are formatted
+//! with their number formats (dates, currency, percentages…), and fonts, fills, borders,
+//! alignment, wrapping, merged cells and conditional formatting ([`super::xlsx_cf`]) are kept;
+//! pictures and shapes are drawn at their anchors ([`super::xlsx_drawing`]). Formulas show their
+//! cached results.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -10,8 +14,11 @@ use chrono::Datelike;
 use pdfcraft_cos::Document;
 use roxmltree::Node;
 
-use super::canvas::Canvas;
+use super::canvas::{Canvas, Page};
 use super::flow::fin;
+use super::xlsx_cf::{self as cf, Dxf, Look};
+use super::xlsx_drawing::{self as drawing, Anchor, Drawn};
+use super::xlsx_hf::{self as hf, HeaderFooter, Pictures};
 use super::xml::{self, Rels, attr, attr_f64, child, children, flag, is, rel_attr};
 use super::zip::Zip;
 use super::{Notes, RunStyle, family_of, hex_color};
@@ -79,6 +86,8 @@ struct Styles {
     borders: Vec<Edges>,
     xfs: Vec<Xf>,
     formats: HashMap<u32, String>,
+    /// Conditional formatting's differential formats.
+    dxfs: Vec<Dxf>,
 }
 
 /// The default palette behind `indexed` colours.
@@ -204,6 +213,7 @@ fn load_styles(zip: &Zip<'_>, rels: &Rels, theme: &[[f64; 3]], notes: &mut Notes
             });
         }
     }
+    s.dxfs = cf::dxfs(root, &|n| color(n, theme));
     if let Some(f) = child(root, "cellXfs") {
         for n in children(f, "xf") {
             let al = child(n, "alignment");
@@ -743,13 +753,26 @@ fn format_number(v: f64, code: &str, date1904: bool) -> (String, bool) {
 #[derive(Clone, Debug)]
 struct Cell {
     text: String,
+    /// The saved number, for conditional formatting.
+    value: Option<f64>,
     numeric: bool,
     boolean: bool,
     xf: usize,
     red: bool,
 }
 
-fn col_index(r: &str) -> Option<(u32, u32)> {
+/// The year and month of a date serial (1900 date system).
+pub(super) fn year_month(serial: f64) -> Option<(i64, u32)> {
+    if !serial.is_finite() || !(1.0..3_000_000.0).contains(&serial) {
+        return None;
+    }
+    let day = serial.floor() as i64;
+    let ce_days = if day >= 60 { day + 693_594 } else { day + 693_595 };
+    let date = chrono::NaiveDate::from_num_days_from_ce_opt(i32::try_from(ce_days).ok()?)?;
+    Some((i64::from(date.year()), date.month()))
+}
+
+pub(super) fn col_index(r: &str) -> Option<(u32, u32)> {
     let letters: String = r.chars().take_while(char::is_ascii_alphabetic).collect();
     let digits = r.get(letters.len()..)?;
     let mut col = 0u32;
@@ -790,10 +813,39 @@ struct Sheet {
     fit: Option<(u32, u32)>,
     paper: (f64, f64),
     margins: [f64; 4],
+    /// Distances of the header from the page's top and of the footer from its bottom.
+    hf_margins: (f64, f64),
+    hf: HeaderFooter,
+    hf_pictures: Pictures,
+    h_center: bool,
+    v_center: bool,
+    /// Pages printed across, then down (`pageOrder="overThenDown"`).
+    over_then_down: bool,
+    /// Manual page breaks: a new page starts after these rows and columns.
+    row_breaks: BTreeSet<u32>,
+    col_breaks: BTreeSet<u32>,
+    /// Print areas (first row, first column, last row, last column), each printed on its own
+    /// pages, and the rows and columns printed on every page.
+    print_areas: Vec<(u32, u32, u32, u32)>,
+    title_rows: Option<(u32, u32)>,
+    title_cols: Option<(u32, u32)>,
+    drawings: Vec<Drawn>,
+    /// How conditional formatting changes cells.
+    looks: HashMap<(u32, u32), Look>,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn read_sheet(zip: &Zip<'_>, part: &str, shared: &[String], styles: &Styles, date1904: bool, notes: &mut Notes) -> Result<Sheet, String> {
+/// What a sheet is read with besides its part.
+struct Book<'a> {
+    shared: &'a [String],
+    styles: &'a Styles,
+    theme: &'a [[f64; 3]],
+    date1904: bool,
+    /// Today as a date serial, for time-period rules.
+    today: f64,
+}
+
+fn read_sheet(zip: &Zip<'_>, part: &str, book: &Book<'_>, doc: &mut Document, notes: &mut Notes) -> Result<Sheet, String> {
+    let (shared, styles, date1904) = (book.shared, book.styles, book.date1904);
     let text = zip.text(part)?.ok_or_else(|| format!("{part} is missing"))?;
     let d = xml::parse(&text).map_err(|e| format!("{part}: {e}"))?;
     let root = d.root_element();
@@ -826,10 +878,52 @@ fn read_sheet(zip: &Zip<'_>, part: &str, shared: &[String], styles: &Styles, dat
             _ => (612.0, 792.0),
         },
         margins: [54.0, 50.4, 54.0, 50.4],
+        hf_margins: (21.6, 21.6),
+        hf: HeaderFooter::default(),
+        hf_pictures: Pictures::new(),
+        h_center: child(root, "printOptions").is_some_and(|p| flag(attr(p, "horizontalCentered")) && attr(p, "horizontalCentered").is_some()),
+        v_center: child(root, "printOptions").is_some_and(|p| flag(attr(p, "verticalCentered")) && attr(p, "verticalCentered").is_some()),
+        over_then_down: child(root, "pageSetup").and_then(|p| attr(p, "pageOrder")) == Some("overThenDown"),
+        row_breaks: BTreeSet::new(),
+        col_breaks: BTreeSet::new(),
+        print_areas: Vec::new(),
+        title_rows: None,
+        title_cols: None,
+        drawings: Vec::new(),
+        looks: HashMap::new(),
     };
     if let Some(m) = child(root, "pageMargins") {
         let g = |k: &str, d: f64| attr_f64(m, k).map_or(d, |v| (v * 72.0).clamp(0.0, 300.0));
         sh.margins = [g("top", 54.0), g("right", 50.4), g("bottom", 54.0), g("left", 50.4)];
+        sh.hf_margins = (g("header", 21.6), g("footer", 21.6));
+    }
+    if let Some(h) = child(root, "headerFooter") {
+        let text = |k: &str| child(h, k).and_then(|c| c.text()).map(str::to_owned);
+        sh.hf = HeaderFooter {
+            odd_header: text("oddHeader"),
+            odd_footer: text("oddFooter"),
+            even_header: text("evenHeader"),
+            even_footer: text("evenFooter"),
+            first_header: text("firstHeader"),
+            first_footer: text("firstFooter"),
+            different_first: flag(attr(h, "differentFirst")) && attr(h, "differentFirst").is_some(),
+            different_odd_even: flag(attr(h, "differentOddEven")) && attr(h, "differentOddEven").is_some(),
+        };
+    }
+    // Manual breaks: `id` is the last row or column before the break (fit-to-page ignores them).
+    for (tag, set) in [("rowBreaks", &mut sh.row_breaks), ("colBreaks", &mut sh.col_breaks)] {
+        for b in child(root, tag).into_iter().flat_map(|b| children(b, "brk")).take(1_026) {
+            if let Some(id) = attr_f64(b, "id").filter(|v| v.is_finite() && *v >= 1.0) {
+                set.insert(id.min(f64::from(MAX_ROW)) as u32);
+            }
+        }
+    }
+    let rels = Rels::load(zip, part).ok();
+    if let Some(target) = child(root, "drawing").and_then(|d| rel_attr(d, "id")).and_then(|id| rels.as_ref()?.target(id)) {
+        sh.drawings = drawing::read(zip, target, doc, book.theme, notes);
+    }
+    if let Some(target) = child(root, "legacyDrawingHF").and_then(|d| rel_attr(d, "id")).and_then(|id| rels.as_ref()?.target(id)) {
+        sh.hf_pictures = hf_pictures(zip, target, doc, notes);
     }
     if let Some(cols) = child(root, "cols") {
         let mut budget = MAX_COL_WORK;
@@ -882,7 +976,7 @@ fn read_sheet(zip: &Zip<'_>, part: &str, shared: &[String], styles: &Styles, dat
                 if child(c, "f").is_some() && child(c, "v").is_none() && ty != "inlineStr" {
                     notes.add("formulas without a saved result, left empty");
                 }
-                let mut cell = Cell { text: String::new(), numeric: false, boolean: false, xf, red: false };
+                let mut cell = Cell { text: String::new(), value: None, numeric: false, boolean: false, xf, red: false };
                 match ty {
                     "s" => cell.text = v.trim().parse::<usize>().ok().and_then(|i| shared.get(i)).cloned().unwrap_or_default(),
                     "inlineStr" => cell.text = child(c, "is").map(|i| xml::text_of(i, "t")).unwrap_or_default(),
@@ -905,6 +999,7 @@ fn read_sheet(zip: &Zip<'_>, part: &str, shared: &[String], styles: &Styles, dat
                             cell.text = t;
                             cell.red = red;
                             cell.numeric = true;
+                            cell.value = Some(x);
                         }
                     }
                 }
@@ -934,10 +1029,36 @@ fn read_sheet(zip: &Zip<'_>, part: &str, shared: &[String], styles: &Styles, dat
             }
         }
     }
-    if child(root, "drawing").is_some() {
-        notes.add("charts and pictures on sheets, left out");
+    if child(root, "conditionalFormatting").is_some() {
+        let values: cf::Cells<'_> = sh.cells.iter().map(|(k, c)| (*k, cf::Value { number: c.value, text: &c.text })).collect();
+        sh.looks = cf::evaluate(root, &values, &styles.dxfs, &|n| color(n, book.theme), book.today, notes);
     }
     Ok(sh)
+}
+
+/// The header and footer pictures of a `legacyDrawingHF` VML part, by shape id.
+fn hf_pictures(zip: &Zip<'_>, part: &str, doc: &mut Document, notes: &mut Notes) -> Pictures {
+    let mut out = Pictures::new();
+    let Ok(Some(text)) = zip.text(part) else { return out };
+    let Ok(d) = xml::parse(&text) else {
+        notes.add("header and footer pictures that can't be read, left out");
+        return out;
+    };
+    let rels = Rels::load(zip, part).ok();
+    for shape in d.descendants().filter(|n| is(*n, "shape")).take(64) {
+        let Some(id) = attr(shape, "id") else { continue };
+        let Some(img) = shape.children().find(|c| is(*c, "imagedata")) else { continue };
+        let (w, h) = hf::vml_size(attr(shape, "style").unwrap_or_default());
+        // `o:relid` is in the VML office namespace, not the relationships one.
+        let rid = img.attributes().find(|a| a.name() == "relid").map(|a| a.value()).or_else(|| rel_attr(img, "id"));
+        let target = rid.and_then(|r| rels.as_ref()?.target(r)).map(str::to_owned);
+        let r = target.and_then(|t| {
+            let bytes = zip.read(&t).ok()??;
+            crate::image_xobject(doc, &t, &bytes).ok().map(|(r, _)| r).or_else(|| super::emf::form(doc, &bytes, notes))
+        });
+        out.insert(id.to_owned(), (r, w, h));
+    }
+    out
 }
 
 fn shared_strings(zip: &Zip<'_>, rels: &Rels) -> Result<Vec<String>, String> {
@@ -950,22 +1071,59 @@ fn shared_strings(zip: &Zip<'_>, rels: &Rels) -> Result<Vec<String>, String> {
         .collect())
 }
 
-fn draw_sheet(canvas: &mut Canvas, sh: &Sheet, styles: &Styles, notes: &mut Notes) -> Result<(), String> {
-    if sh.cells.is_empty() {
-        return Ok(());
+/// A sheet's page waiting for its header and footer (drawn once the page count is known).
+struct HfJob {
+    page: usize,
+    sheet: usize,
+    first: bool,
+}
+
+/// What a sheet's headers and footers need after its pages are drawn.
+struct HfSheet {
+    name: String,
+    hf: HeaderFooter,
+    pictures: Pictures,
+    margins: [f64; 4],
+    hf_margins: (f64, f64),
+}
+
+/// A sheet measured for printing: row heights (grown for wrapped text), wrapped lines, and
+/// running offsets so a column's or row's position is two lookups.
+struct Grid<'a> {
+    sh: &'a Sheet,
+    styles: &'a Styles,
+    heights: Vec<f64>,
+    wrapped: HashMap<(u32, u32), Vec<String>>,
+    texts: HashMap<(u32, u32), String>,
+    /// `col_at[c]` is the width of the columns before `c`, `row_at[r]` the height of the rows
+    /// before `r`; both go one past the last, for the far edge.
+    col_at: Vec<f64>,
+    row_at: Vec<f64>,
+}
+
+impl Grid<'_> {
+    fn width(&self, c: u32) -> f64 {
+        if self.sh.hidden_cols.contains(&c) { 0.0 } else { self.sh.widths.get(&c).copied().unwrap_or(self.sh.default_w) }
     }
-    let max_row = sh.cells.keys().map(|(r, _)| *r).max().unwrap_or(1);
-    let max_col = sh.cells.keys().map(|(_, c)| *c).max().unwrap_or(1);
-    let (pw, ph) = if sh.landscape { (sh.paper.1, sh.paper.0) } else { sh.paper };
-    let [mt, mr, mb, ml] = sh.margins;
-    let area_w = (pw - ml - mr).max(72.0);
-    let area_h = (ph - mt - mb).max(72.0);
-    let width = |c: u32| if sh.hidden_cols.contains(&c) { 0.0 } else { sh.widths.get(&c).copied().unwrap_or(sh.default_w) };
-    let font_of = |xf: usize| -> Font {
-        styles.xfs.get(xf).and_then(|x| styles.fonts.get(x.font)).cloned().unwrap_or(Font { name: "Calibri".into(), size: 11.0, ..Font::default() })
-    };
-    let style_of = |cell: &Cell| -> RunStyle {
-        let f = font_of(cell.xf);
+
+    fn row_h(&self, r: u32) -> f64 {
+        self.heights.get(r as usize).copied().unwrap_or(0.0)
+    }
+
+    fn col_x(&self, c: u32) -> f64 {
+        self.col_at.get(c as usize).or(self.col_at.last()).copied().unwrap_or(0.0)
+    }
+
+    fn row_y(&self, r: u32) -> f64 {
+        self.row_at.get(r as usize).or(self.row_at.last()).copied().unwrap_or(0.0)
+    }
+
+    fn style_of(&self, cell: &Cell) -> RunStyle {
+        let f = self.styles.xfs.get(cell.xf).and_then(|x| self.styles.fonts.get(x.font)).cloned().unwrap_or(Font {
+            name: "Calibri".into(),
+            size: 11.0,
+            ..Font::default()
+        });
         RunStyle {
             fam: family_of(&f.name),
             bold: f.bold,
@@ -976,78 +1134,133 @@ fn draw_sheet(canvas: &mut Canvas, sh: &Sheet, styles: &Styles, notes: &mut Note
             strike: f.strike,
             ..RunStyle::default()
         }
+    }
+
+    /// A drawing's rectangle on the sheet (x, y from the top-left of A1, width, height).
+    fn rect_of(&self, a: &Anchor) -> (f64, f64, f64, f64) {
+        let at = |c: &drawing::Corner| (self.col_x(c.col.saturating_add(1)) + c.dx, self.row_y(c.row.saturating_add(1)) + c.dy);
+        match a {
+            Anchor::Cells(f, t) => {
+                let (x1, y1) = at(f);
+                let (x2, y2) = at(t);
+                (x1, y1, (x2 - x1).max(0.0), (y2 - y1).max(0.0))
+            }
+            Anchor::Sized(f, w, h) => {
+                let (x, y) = at(f);
+                (x, y, *w, *h)
+            }
+            Anchor::Absolute(x, y, w, h) => (*x, *y, *w, *h),
+        }
+    }
+}
+
+/// The last row and column a drawing reaches, from default sizes (before wrapped rows grow).
+fn drawing_extent(sh: &Sheet, a: &Anchor) -> (u32, u32) {
+    let width = |c: u32| if sh.hidden_cols.contains(&c) { 0.0 } else { sh.widths.get(&c).copied().unwrap_or(sh.default_w) };
+    let height = |r: u32| if sh.hidden_rows.contains(&r) { 0.0 } else { sh.heights.get(&r).map_or(sh.default_h, |(h, _)| *h) };
+    // Walk from a cell until `len` points are covered (bounded by the sheet's size).
+    let walk = |start: u32, len: f64, size: &dyn Fn(u32) -> f64, max: u32| {
+        let (mut i, mut left) = (start, len);
+        while i < max && left > size(i) && size(i) >= 0.0 {
+            left -= size(i);
+            i += 1;
+            if i - start > 100_000 {
+                break;
+            }
+        }
+        i
     };
-    // Row heights; wrapped text makes a row without a custom height taller.
-    let mut heights: Vec<f64> = vec![0.0; max_row as usize + 1];
-    let mut wrapped: HashMap<(u32, u32), Vec<String>> = HashMap::new();
-    let mut texts: HashMap<(u32, u32), String> = HashMap::new();
+    match a {
+        Anchor::Cells(_, t) => (t.row.saturating_add(1).min(MAX_ROW), t.col.saturating_add(1).min(MAX_COL)),
+        Anchor::Sized(f, w, h) => {
+            (walk(f.row.saturating_add(1), f.dy + h, &height, MAX_ROW), walk(f.col.saturating_add(1), f.dx + w, &width, MAX_COL))
+        }
+        Anchor::Absolute(x, y, w, h) => (walk(1, y + h, &height, MAX_ROW), walk(1, x + w, &width, MAX_COL)),
+    }
+}
+
+/// Split `from..=to` into page bands: a band ends when the next item doesn't fit in what
+/// `avail` leaves for a band starting there, or after a manual break.
+fn bands(from: u32, to: u32, size: &dyn Fn(u32) -> f64, avail: &dyn Fn(u32) -> f64, breaks: &BTreeSet<u32>) -> Vec<(u32, u32)> {
+    let mut out = Vec::new();
+    let (mut start, mut used) = (from, 0.0);
+    for i in from..=to {
+        let s = size(i);
+        let manual = i > start && breaks.contains(&(i - 1));
+        if manual || (used + s > avail(start) && used > 0.0) {
+            out.push((start, i - 1));
+            start = i;
+            used = 0.0;
+        }
+        used += s;
+    }
+    out.push((start, to));
+    out
+}
+
+fn draw_sheet(canvas: &mut Canvas, sh: &Sheet, styles: &Styles, notes: &mut Notes, jobs: &mut Vec<HfJob>, sheet_index: usize) -> Result<(), String> {
+    if sh.cells.is_empty() && sh.drawings.is_empty() {
+        return Ok(());
+    }
+    let mut max_row = sh.cells.keys().map(|(r, _)| *r).max().unwrap_or(1);
+    let mut max_col = sh.cells.keys().map(|(_, c)| *c).max().unwrap_or(1);
+    // Pictures and shapes are printed with the cells: the used range reaches them.
+    for d in &sh.drawings {
+        let (r, c) = drawing_extent(sh, &d.anchor);
+        max_row = max_row.max(r);
+        max_col = max_col.max(c);
+    }
+    let (pw, ph) = if sh.landscape { (sh.paper.1, sh.paper.0) } else { sh.paper };
+    let [mt, mr, mb, ml] = sh.margins;
+    let area_w = (pw - ml - mr).max(72.0);
+    let area_h = (ph - mt - mb).max(72.0);
+    let mut g = Grid {
+        sh,
+        styles,
+        heights: vec![0.0; max_row as usize + 1],
+        wrapped: HashMap::new(),
+        texts: HashMap::new(),
+        col_at: Vec::new(),
+        row_at: Vec::new(),
+    };
     for ((r, c), cell) in &sh.cells {
         // Line breaks are split on below (or become spaces), and `drawable` drops control
         // characters, so each line is made drawable on its own.
         let lines: Vec<String> = cell.text.split('\n').map(|line| notes.drawable(line)).collect();
-        texts.insert((*r, *c), lines.join("\n"));
+        g.texts.insert((*r, *c), lines.join("\n"));
     }
     for r in 1..=max_row {
         let h = if sh.hidden_rows.contains(&r) { 0.0 } else { sh.heights.get(&r).map_or(sh.default_h, |(h, _)| *h) };
-        if let Some(slot) = heights.get_mut(r as usize) {
+        if let Some(slot) = g.heights.get_mut(r as usize) {
             *slot = h;
         }
     }
+    // Wrapped text makes a row without a custom height taller. A merged range wraps across its
+    // whole width, and Excel never grows rows for it.
+    let merge_ends: HashMap<(u32, u32), u32> = sh.merges.iter().map(|&(r1, c1, _, c2)| ((r1, c1), c2)).collect();
     for ((r, c), cell) in &sh.cells {
         let Some(xf) = styles.xfs.get(cell.xf) else { continue };
         if !xf.wrap || cell.text.is_empty() {
             continue;
         }
-        let style = style_of(cell);
-        let w = (width(*c) - 4.0).max(4.0);
-        let text = texts.get(&(*r, *c)).cloned().unwrap_or_default();
+        let style = g.style_of(cell);
+        let merged_to = merge_ends.get(&(*r, *c)).copied();
+        let w = (merged_to.map_or_else(|| g.width(*c), |c2| (*c..=c2.min(c.saturating_add(16_384))).map(|cc| g.width(cc)).sum()) - 4.0).max(4.0);
+        let text = g.texts.get(&(*r, *c)).cloned().unwrap_or_default();
         let lines: Vec<String> = text
             .split('\n')
             .flat_map(|p| pdfcraft_fonts::wrap_with(p, style.size, w, |s, size| RunStyle { size, ..style.clone() }.width(s)))
             .collect();
         let need = lines.len() as f64 * style.size * 1.2 + 3.0;
         if !sh.heights.get(r).is_some_and(|(_, custom)| *custom)
-            && let Some(slot) = heights.get_mut(*r as usize)
+            && merged_to.is_none()
+            && let Some(slot) = g.heights.get_mut(*r as usize)
             && *slot > 0.0
         {
             *slot = slot.max(need);
         }
-        wrapped.insert((*r, *c), lines);
+        g.wrapped.insert((*r, *c), lines);
     }
-    // Pages: bands of columns across, bands of rows down; printed down, then over.
-    let bands = |n: u32, size: &dyn Fn(u32) -> f64, avail: f64| -> Vec<(u32, u32)> {
-        let mut out = Vec::new();
-        let (mut start, mut used) = (1u32, 0.0);
-        for i in 1..=n {
-            let s = size(i);
-            if used + s > avail && used > 0.0 {
-                out.push((start, i - 1));
-                start = i;
-                used = 0.0;
-            }
-            used += s;
-        }
-        out.push((start, n));
-        out
-    };
-    let row_h = |r: u32| heights.get(r as usize).copied().unwrap_or(0.0);
-    // Excel's print scale: fitting only ever shrinks; 0 pages means "as many as needed".
-    let k = match sh.fit {
-        Some((fw, fh)) => {
-            let total_w: f64 = (1..=max_col).map(width).sum();
-            let total_h: f64 = (1..=max_row).map(row_h).sum();
-            let kw = if fw > 0 && total_w > 0.0 { area_w * f64::from(fw) / total_w } else { f64::INFINITY };
-            let kh = if fh > 0 && total_h > 0.0 { area_h * f64::from(fh) / total_h } else { f64::INFINITY };
-            kw.min(kh).clamp(0.1, 1.0)
-        }
-        None => sh.scale,
-    };
-    let col_bands = bands(max_col, &width, area_w / k);
-    let row_bands = bands(max_row, &row_h, area_h / k);
-    // Running totals, so a column's or row's offset on its page is two lookups instead of a sum
-    // over the band before it (a band of hidden columns or rows can be thousands long):
-    // `col_at[c]` is the width of the columns before `c`, `row_at[r]` the height of the rows
-    // before `r`; both go one past the last, for the far edge.
     let running = |n: u32, size: &dyn Fn(u32) -> f64| -> Vec<f64> {
         let mut at = vec![0.0; 2];
         for i in 1..=n {
@@ -1056,179 +1269,119 @@ fn draw_sheet(canvas: &mut Canvas, sh: &Sheet, styles: &Styles, notes: &mut Note
         }
         at
     };
-    let col_at = running(max_col, &width);
-    let row_at = running(max_row, &row_h);
-    let at = |v: &[f64], i: u32| v.get(i as usize).or(v.last()).copied().unwrap_or(0.0);
-    // Only the pages a cell is on, found from the cells: a sparse sheet (one value at XFD1048576,
-    // wide columns, tall rows) has billions of empty ones. Ordered down, then over.
-    let band_of = |bands: &[(u32, u32)], i: u32| bands.partition_point(|(_, end)| *end < i);
-    let pages: BTreeSet<(usize, usize)> = sh.cells.keys().map(|(r, c)| (band_of(&col_bands, *c), band_of(&row_bands, *r))).collect();
-    // Each lookup scans the page's merges; past this many comparisons on a sheet, the rest of its
-    // cells are drawn unmerged (and that is reported) rather than scanning on.
+    g.col_at = running(max_col, &|c| g.width(c));
+    g.row_at = running(max_row, &|r| g.row_h(r));
+    let span_w = |a: u32, b: u32| g.col_x(b.saturating_add(1)) - g.col_x(a);
+    let span_h = |a: u32, b: u32| g.row_y(b.saturating_add(1)) - g.row_y(a);
+    // Each print area on its own pages; without one, the used range.
+    let areas: Vec<(u32, u32, u32, u32)> = if sh.print_areas.is_empty() {
+        vec![(1, 1, max_row, max_col)]
+    } else {
+        sh.print_areas
+            .iter()
+            .map(|&(r1, c1, r2, c2)| (r1.min(max_row), c1.min(max_col), r2.min(max_row).max(r1.min(max_row)), c2.min(max_col).max(c1.min(max_col))))
+            .collect()
+    };
+    let title_rows = sh.title_rows.map(|(a, b)| (a.min(max_row), b.min(max_row)));
+    let title_cols = sh.title_cols.map(|(a, b)| (a.min(max_col), b.min(max_col)));
+    let no_breaks = BTreeSet::new();
+    let mut first = true;
     let merge_work = std::cell::Cell::new(MAX_MERGE_WORK);
     let merge_cut = std::cell::Cell::new(false);
-    for (ci, ri) in pages {
-        let (Some((c0, c1)), Some((r0, r1))) = (col_bands.get(ci), row_bands.get(ri)) else { continue };
-        // Only the merges that touch this page are searched for each of its cells.
-        let merges: Vec<(u32, u32, u32, u32)> =
-            sh.merges.iter().copied().filter(|(mr1, mc1, mr2, mc2)| *mr1 <= *r1 && *mr2 >= *r0 && *mc1 <= *c1 && *mc2 >= *c0).collect();
-        let merged_at = |r: u32, c: u32| {
-            let Some(left) = merge_work.get().checked_sub(merges.len()) else {
-                merge_cut.set(true);
-                return None;
-            };
-            merge_work.set(left);
-            merges.iter().find(|(r1, c1, r2, c2)| (*r1..=*r2).contains(&r) && (*c1..=*c2).contains(&c)).copied()
+    for (ar1, ac1, ar2, ac2) in areas {
+        // Excel's print scale: fitting only ever shrinks; 0 pages means "as many as needed".
+        let k = match sh.fit {
+            Some((fw, fh)) => {
+                let total_w = span_w(ac1, ac2);
+                let total_h = span_h(ar1, ar2);
+                let kw = if fw > 0 && total_w > 0.0 { area_w * f64::from(fw) / total_w } else { f64::INFINITY };
+                let kh = if fh > 0 && total_h > 0.0 { area_h * f64::from(fh) / total_h } else { f64::INFINITY };
+                kw.min(kh).clamp(0.1, 1.0)
+            }
+            None => sh.scale,
         };
-        let pi = canvas.new_page(pw, ph)?;
-        let Some(page) = canvas.page(pi) else { continue };
-        // Scale about the printable area's top-left corner.
-        page.save();
-        if (k - 1.0).abs() > 1e-6 {
-            page.raw(&format!(
-                "{} 0 0 {} {} {} cm\n",
-                super::canvas::n(k),
-                super::canvas::n(k),
-                super::canvas::n(ml * (1.0 - k)),
-                super::canvas::n((ph - mt) * (1.0 - k))
-            ));
-        }
-        let x_of = |c: u32| ml + at(&col_at, c) - at(&col_at, *c0);
-        let y_of = |r: u32| ph - mt - (at(&row_at, r) - at(&row_at, *r0));
-        if sh.gridlines {
-            let (xa, xb) = (x_of(*c0), x_of(c1 + 1));
-            let (ya, yb) = (y_of(*r0), y_of(r1 + 1));
-            // A hidden column or row puts its gridline where the next one goes: draw it once.
-            let mut last = f64::NAN;
-            for c in *c0..=c1 + 1 {
-                let x = x_of(c);
-                if (x - last).abs() > 0.01 || c == *c0 {
-                    page.line(x, ya, x, yb, 0.25, [0.75; 3]);
-                    last = x;
+        // Title rows and columns repeat on the pages after them, taking their room there.
+        let title_h = title_rows.map_or(0.0, |(a, b)| span_h(a, b));
+        let title_w = title_cols.map_or(0.0, |(a, b)| span_w(a, b));
+        let avail_w = |start: u32| area_w / k - if title_cols.is_some_and(|(_, b)| start > b) { title_w } else { 0.0 };
+        let avail_h = |start: u32| area_h / k - if title_rows.is_some_and(|(_, b)| start > b) { title_h } else { 0.0 };
+        let (rb, cb) = if sh.fit.is_some() { (&no_breaks, &no_breaks) } else { (&sh.row_breaks, &sh.col_breaks) };
+        let col_bands = bands(ac1, ac2, &|c| g.width(c), &avail_w, cb);
+        let row_bands = bands(ar1, ar2, &|r| g.row_h(r), &avail_h, rb);
+        let band_of = |bands: &[(u32, u32)], i: u32| bands.partition_point(|(_, end)| *end < i);
+        // Only the pages something is printed on: a sparse sheet has billions of empty ones.
+        let mut pages: BTreeSet<(usize, usize)> = BTreeSet::new();
+        if sh.print_areas.is_empty() {
+            pages.extend(sh.cells.keys().map(|(r, c)| (band_of(&col_bands, *c), band_of(&row_bands, *r))));
+            for d in &sh.drawings {
+                let (x, y, w, h) = g.rect_of(&d.anchor);
+                let col_of = |x: f64| g.col_at.partition_point(|v| *v <= x).saturating_sub(1).max(1) as u32;
+                let row_of = |y: f64| g.row_at.partition_point(|v| *v <= y).saturating_sub(1).max(1) as u32;
+                let (c1, c2) = (band_of(&col_bands, col_of(x)), band_of(&col_bands, col_of(x + w)));
+                let (r1, r2) = (band_of(&row_bands, row_of(y)), band_of(&row_bands, row_of(y + h)));
+                for ci in c1..=c2.min(c1 + 64) {
+                    for ri in r1..=r2.min(r1 + 64) {
+                        pages.insert((ci, ri));
+                    }
                 }
             }
-            last = f64::NAN;
-            for r in *r0..=r1 + 1 {
-                let y = y_of(r);
-                if (y - last).abs() > 0.01 || r == *r0 {
-                    page.line(xa, y, xb, y, 0.25, [0.75; 3]);
-                    last = y;
-                }
-            }
+            pages.retain(|(ci, ri)| *ci < col_bands.len() && *ri < row_bands.len());
+        } else {
+            pages.extend((0..col_bands.len()).flat_map(|ci| (0..row_bands.len()).map(move |ri| (ci, ri))));
         }
-        // Fills first, then text, then borders on top. The page's cells, row by occupied row and
-        // only within its columns, already in (row, col) order: a wide sheet's row band holds
-        // every column band's cells, and a band of hidden rows can be a million rows tall.
-        let next_row = |from: u32| (from <= *r1).then(|| sh.cells.range((from, 0)..=(*r1, u32::MAX)).next()).flatten().map(|((r, _), _)| *r);
-        let mut cells_here: Vec<(&(u32, u32), &Cell)> = Vec::new();
-        let mut row = next_row(*r0);
-        while let Some(r) = row {
-            cells_here.extend(sh.cells.range((r, *c0)..=(r, *c1)));
-            row = r.checked_add(1).and_then(next_row);
+        let mut order: Vec<(usize, usize)> = pages.into_iter().collect();
+        if sh.over_then_down {
+            order.sort_by_key(|(ci, ri)| (*ri, *ci));
         }
-        let rect = |r: u32, c: u32| -> (f64, f64, f64, f64) {
-            let (r2, c2) = match merged_at(r, c) {
-                Some((mr1, mc1, mr2, mc2)) if mr1 == r && mc1 == c => (mr2.min(*r1), mc2.min(*c1)),
-                _ => (r, c),
-            };
-            let x = x_of(c);
-            let w = x_of(c2 + 1) - x;
-            let top = y_of(r);
-            let h = top - y_of(r2 + 1);
-            (x, top - h, w, h)
-        };
-        let covered = |r: u32, c: u32| merged_at(r, c).is_some_and(|(mr1, mc1, _, _)| (mr1, mc1) != (r, c));
-        for ((r, c), cell) in &cells_here {
-            if covered(*r, *c) {
-                continue;
-            }
-            let Some(xf) = styles.xfs.get(cell.xf) else { continue };
-            if let Some(Some(f)) = styles.fills.get(xf.fill) {
-                let (x, y, w, h) = rect(*r, *c);
-                page.fill_rect(x, y, w, h, *f);
-            }
-        }
-        for ((r, c), cell) in &cells_here {
-            if covered(*r, *c) || cell.text.is_empty() {
-                continue;
-            }
-            let xf = styles.xfs.get(cell.xf).cloned().unwrap_or_default();
-            let style = style_of(cell);
-            let (x, y, w, h) = rect(*r, *c);
-            if w <= 0.0 || h <= 0.0 {
-                continue;
-            }
-            let text = texts.get(&(*r, *c)).cloned().unwrap_or_default();
-            let lines = wrapped.get(&(*r, *c)).cloned().unwrap_or_else(|| vec![text.replace('\n', " ")]);
-            let line_h = style.size * 1.2;
-            let block = lines.len() as f64 * line_h;
-            let base_top = match xf.v_align.as_deref() {
-                Some("top") => y + h - 1.0,
-                Some("center") => y + h / 2.0 + block / 2.0,
-                _ => y + block + 1.0,
-            };
-            // "general" is the default, written out by LibreOffice and others.
-            let align = xf.h_align.clone().filter(|a| a != "general" && !a.is_empty()).unwrap_or_else(|| {
-                if cell.numeric {
-                    "right".into()
-                } else if cell.boolean {
-                    "center".into()
-                } else {
-                    "left".into()
-                }
-            });
-            // Text may run into empty neighbours unless it wraps or is a number, as in Excel.
-            let mut clip_w = w;
-            if !xf.wrap && !cell.numeric && align == "left" {
-                let tw = lines.first().map_or(0.0, |l| style.width(l));
-                let mut cc = c + 1;
-                while clip_w < tw + 4.0 && cc <= *c1 && sh.cells.get(&(*r, cc)).is_none_or(|n| n.text.is_empty()) && !covered(*r, cc) {
-                    clip_w += width(cc);
-                    cc += 1;
-                }
-            }
+        for (ci, ri) in order {
+            let (Some(&(c0, c1)), Some(&(r0, r1))) = (col_bands.get(ci), row_bands.get(ri)) else { continue };
+            let row_segs: Vec<(u32, u32)> = title_rows.filter(|(_, b)| r0 > *b).into_iter().chain(std::iter::once((r0, r1))).collect();
+            let col_segs: Vec<(u32, u32)> = title_cols.filter(|(_, b)| c0 > *b).into_iter().chain(std::iter::once((c0, c1))).collect();
+            let content_w: f64 = col_segs.iter().map(|(a, b)| span_w(*a, *b)).sum();
+            let content_h: f64 = row_segs.iter().map(|(a, b)| span_h(*a, *b)).sum();
+            let cx = if sh.h_center { ((area_w - content_w * k) / 2.0).max(0.0) } else { 0.0 };
+            let cy = if sh.v_center { ((area_h - content_h * k) / 2.0).max(0.0) } else { 0.0 };
+            let pi = canvas.new_page(pw, ph)?;
+            jobs.push(HfJob { page: pi, sheet: sheet_index, first });
+            first = false;
+            let Some(page) = canvas.page(pi) else { continue };
+            // Scale about the printable area's top-left corner, moved to centre the content.
             page.save();
-            page.clip_rect(x, y, clip_w, h);
-            for (i, l) in lines.iter().enumerate() {
-                let tw = style.width(l);
-                let indent = xf.indent * 9.0;
-                let lx = match align.as_str() {
-                    "right" => x + w - 2.0 - tw - indent,
-                    "center" | "centerContinuous" => x + (w - tw) / 2.0,
-                    _ => x + 2.0 + indent,
-                };
-                let ly = base_top - (i as f64 + 1.0) * line_h + style.size * 0.25;
-                if numeric_overflow(cell, tw, w) {
-                    // Excel shows ### when a number doesn't fit its column.
-                    let hashes = "#".repeat(((w - 4.0) / style.width("#")).floor().clamp(1.0, 255.0) as usize);
-                    page.text(x + 2.0, ly, &style, &hashes);
-                } else {
-                    page.text(lx, ly, &style, l);
+            if (k - 1.0).abs() > 1e-6 || cx > 0.0 || cy > 0.0 {
+                page.raw(&format!(
+                    "{} 0 0 {} {} {} cm\n",
+                    super::canvas::n(k),
+                    super::canvas::n(k),
+                    super::canvas::n(ml * (1.0 - k) + cx),
+                    super::canvas::n((ph - mt) * (1.0 - k) - cy)
+                ));
+            }
+            let mut oy = ph - mt;
+            for rs in &row_segs {
+                let mut ox = ml;
+                for cs in &col_segs {
+                    draw_block(page, &g, *rs, *cs, (ox, oy), &merge_work, &merge_cut);
+                    // Pictures and shapes in the page's own cells, clipped to them.
+                    if *rs == (r0, r1) && *cs == (c0, c1) {
+                        let (bw, bh) = (span_w(c0, c1), span_h(r0, r1));
+                        page.save();
+                        page.clip_rect(ox, oy - bh, bw, bh);
+                        for d in &sh.drawings {
+                            let (x, y, w, h) = g.rect_of(&d.anchor);
+                            let (px, py) = (ox + x - g.col_x(c0), oy - (y - g.row_y(r0)));
+                            if px + w < ox || px > ox + bw || py < oy - bh || py - h > oy {
+                                continue;
+                            }
+                            drawing::draw(page, d, px, py - h, w, h);
+                        }
+                        page.restore();
+                    }
+                    ox += span_w(cs.0, cs.1);
                 }
+                oy -= span_h(rs.0, rs.1);
             }
             page.restore();
         }
-        for ((r, c), cell) in &cells_here {
-            if covered(*r, *c) {
-                continue;
-            }
-            let Some(xf) = styles.xfs.get(cell.xf) else { continue };
-            let Some(b) = styles.borders.get(xf.border) else { continue };
-            let (x, y, w, h) = rect(*r, *c);
-            if let Some(e) = b.top {
-                page.line(x, y + h, x + w, y + h, e.width, e.color);
-            }
-            if let Some(e) = b.bottom {
-                page.line(x, y, x + w, y, e.width, e.color);
-            }
-            if let Some(e) = b.left {
-                page.line(x, y, x, y + h, e.width, e.color);
-            }
-            if let Some(e) = b.right {
-                page.line(x + w, y, x + w, y + h, e.width, e.color);
-            }
-        }
-        page.restore();
     }
     if merge_cut.get() {
         notes.add("merged ranges on very dense pages, drawn unmerged");
@@ -1236,11 +1389,246 @@ fn draw_sheet(canvas: &mut Canvas, sh: &Sheet, styles: &Styles, notes: &mut Note
     Ok(())
 }
 
+/// Draw the cells of rows `r0..=r1` and columns `c0..=c1` with their top-left corner at PDF
+/// `(ox, oy)`: fills, then text, then borders.
+fn draw_block(
+    page: &mut Page,
+    g: &Grid<'_>,
+    (r0, r1): (u32, u32),
+    (c0, c1): (u32, u32),
+    (ox, oy): (f64, f64),
+    merge_work: &std::cell::Cell<usize>,
+    merge_cut: &std::cell::Cell<bool>,
+) {
+    let (sh, styles) = (g.sh, g.styles);
+    // Only the merges that touch this block are searched for each of its cells. Past the
+    // sheet's budget of comparisons the rest of its cells are drawn unmerged (and reported).
+    let merges: Vec<(u32, u32, u32, u32)> =
+        sh.merges.iter().copied().filter(|(mr1, mc1, mr2, mc2)| *mr1 <= r1 && *mr2 >= r0 && *mc1 <= c1 && *mc2 >= c0).collect();
+    let merged_at = |r: u32, c: u32| {
+        let Some(left) = merge_work.get().checked_sub(merges.len()) else {
+            merge_cut.set(true);
+            return None;
+        };
+        merge_work.set(left);
+        merges.iter().find(|(r1, c1, r2, c2)| (*r1..=*r2).contains(&r) && (*c1..=*c2).contains(&c)).copied()
+    };
+    let x_of = |c: u32| ox + g.col_x(c) - g.col_x(c0);
+    let y_of = |r: u32| oy - (g.row_y(r) - g.row_y(r0));
+    if sh.gridlines {
+        let (xa, xb) = (x_of(c0), x_of(c1 + 1));
+        let (ya, yb) = (y_of(r0), y_of(r1 + 1));
+        // A hidden column or row puts its gridline where the next one goes: draw it once.
+        let mut last = f64::NAN;
+        for c in c0..=c1 + 1 {
+            let x = x_of(c);
+            if (x - last).abs() > 0.01 || c == c0 {
+                page.line(x, ya, x, yb, 0.25, [0.75; 3]);
+                last = x;
+            }
+        }
+        last = f64::NAN;
+        for r in r0..=r1 + 1 {
+            let y = y_of(r);
+            if (y - last).abs() > 0.01 || r == r0 {
+                page.line(xa, y, xb, y, 0.25, [0.75; 3]);
+                last = y;
+            }
+        }
+    }
+    // The block's cells, row by occupied row and only within its columns, already in (row,
+    // col) order: a band of hidden rows can be a million rows tall.
+    let next_row = |from: u32| (from <= r1).then(|| sh.cells.range((from, 0)..=(r1, u32::MAX)).next()).flatten().map(|((r, _), _)| *r);
+    let mut cells_here: Vec<(&(u32, u32), &Cell)> = Vec::new();
+    let mut row = next_row(r0);
+    while let Some(r) = row {
+        cells_here.extend(sh.cells.range((r, c0)..=(r, c1)));
+        row = r.checked_add(1).and_then(next_row);
+    }
+    let rect = |r: u32, c: u32| -> (f64, f64, f64, f64) {
+        let (r2, c2) = match merged_at(r, c) {
+            Some((mr1, mc1, mr2, mc2)) if mr1 == r && mc1 == c => (mr2.min(r1), mc2.min(c1)),
+            _ => (r, c),
+        };
+        let x = x_of(c);
+        let w = x_of(c2 + 1) - x;
+        let top = y_of(r);
+        let h = top - y_of(r2 + 1);
+        (x, top - h, w, h)
+    };
+    let covered = |r: u32, c: u32| merged_at(r, c).is_some_and(|(mr1, mc1, _, _)| (mr1, mc1) != (r, c));
+    for ((r, c), cell) in &cells_here {
+        if covered(*r, *c) {
+            continue;
+        }
+        let Some(xf) = styles.xfs.get(cell.xf) else { continue };
+        let look = sh.looks.get(&(*r, *c));
+        let fill = look.and_then(|l| l.fill).or_else(|| styles.fills.get(xf.fill).copied().flatten());
+        if let Some(f) = fill {
+            let (x, y, w, h) = rect(*r, *c);
+            page.fill_rect(x, y, w, h, f);
+        }
+        // A data bar from the cell's left edge, between a tenth and nine tenths of the cell as
+        // its value goes from the lowest to the highest, fading from its colour to white.
+        if let Some((share, col)) = look.and_then(|l| l.bar) {
+            let (x, y, w, h) = rect(*r, *c);
+            let len = ((w - 3.0) * (0.1 + 0.8 * share)).max(0.0);
+            const STRIPS: u32 = 12;
+            for i in 0..STRIPS {
+                let t = f64::from(i) / f64::from(STRIPS);
+                let c = col.map(|v| v + (1.0 - v) * t * 0.85);
+                page.fill_rect(x + 1.5 + len * t, y + 1.5, len / f64::from(STRIPS) + 0.05, (h - 3.0).max(0.0), c);
+            }
+        }
+    }
+    for ((r, c), cell) in &cells_here {
+        if covered(*r, *c) || cell.text.is_empty() {
+            continue;
+        }
+        let xf = styles.xfs.get(cell.xf).cloned().unwrap_or_default();
+        let mut style = g.style_of(cell);
+        let (mut x, y, mut w, h) = rect(*r, *c);
+        if w <= 0.0 || h <= 0.0 {
+            continue;
+        }
+        if let Some(l) = sh.looks.get(&(*r, *c)) {
+            style.color = l.color.unwrap_or(style.color);
+            style.bold = l.bold.unwrap_or(style.bold);
+            style.italic = l.italic.unwrap_or(style.italic);
+            style.underline = l.underline.unwrap_or(style.underline);
+            style.strike = l.strike.unwrap_or(style.strike);
+            // An icon sits at the cell's left; the value moves over to make room.
+            if let Some(icon) = l.icon {
+                let size = (h - 3.0).clamp(4.0, 12.0);
+                cf::draw_icon(page, icon, x + 2.0, y + (h - size) / 2.0, size);
+                x += size + 2.0;
+                w -= size + 2.0;
+            }
+            if l.hide_value {
+                continue;
+            }
+        }
+        let text = g.texts.get(&(*r, *c)).cloned().unwrap_or_default();
+        let lines = g.wrapped.get(&(*r, *c)).cloned().unwrap_or_else(|| vec![text.replace('\n', " ")]);
+        let line_h = style.size * 1.2;
+        let block = lines.len() as f64 * line_h;
+        let base_top = match xf.v_align.as_deref() {
+            Some("top") => y + h - 1.0,
+            Some("center") => y + h / 2.0 + block / 2.0,
+            _ => y + block + 1.0,
+        };
+        // "general" is the default, written out by LibreOffice and others.
+        let align = xf.h_align.clone().filter(|a| a != "general" && !a.is_empty()).unwrap_or_else(|| {
+            if cell.numeric {
+                "right".into()
+            } else if cell.boolean {
+                "center".into()
+            } else {
+                "left".into()
+            }
+        });
+        // Text may run into empty neighbours unless it wraps or is a number, as in Excel.
+        let mut clip_w = w;
+        if !xf.wrap && !cell.numeric && align == "left" {
+            let tw = lines.first().map_or(0.0, |l| style.width(l));
+            let mut cc = c + 1;
+            while clip_w < tw + 4.0 && cc <= c1 && sh.cells.get(&(*r, cc)).is_none_or(|n| n.text.is_empty()) && !covered(*r, cc) {
+                clip_w += g.width(cc);
+                cc += 1;
+            }
+        }
+        page.save();
+        page.clip_rect(x, y, clip_w, h);
+        for (i, l) in lines.iter().enumerate() {
+            let tw = style.width(l);
+            let indent = xf.indent * 9.0;
+            let lx = match align.as_str() {
+                "right" => x + w - 2.0 - tw - indent,
+                "center" | "centerContinuous" => x + (w - tw) / 2.0,
+                _ => x + 2.0 + indent,
+            };
+            let ly = base_top - (i as f64 + 1.0) * line_h + style.size * 0.25;
+            if numeric_overflow(cell, tw, w) {
+                // Excel shows ### when a number doesn't fit its column.
+                let hashes = "#".repeat(((w - 4.0) / style.width("#")).floor().clamp(1.0, 255.0) as usize);
+                page.text(x + 2.0, ly, &style, &hashes);
+            } else {
+                page.text(lx, ly, &style, l);
+            }
+        }
+        page.restore();
+    }
+    for ((r, c), cell) in &cells_here {
+        if covered(*r, *c) {
+            continue;
+        }
+        let Some(xf) = styles.xfs.get(cell.xf) else { continue };
+        let Some(b) = styles.borders.get(xf.border) else { continue };
+        let (x, y, w, h) = rect(*r, *c);
+        if let Some(e) = b.top {
+            page.line(x, y + h, x + w, y + h, e.width, e.color);
+        }
+        if let Some(e) = b.bottom {
+            page.line(x, y, x + w, y, e.width, e.color);
+        }
+        if let Some(e) = b.left {
+            page.line(x, y, x, y + h, e.width, e.color);
+        }
+        if let Some(e) = b.right {
+            page.line(x + w, y, x + w, y + h, e.width, e.color);
+        }
+    }
+}
+
 fn numeric_overflow(cell: &Cell, text_w: f64, w: f64) -> bool {
     cell.numeric && text_w > w - 2.0 && w > 6.0
 }
 
-pub(crate) fn convert(zip: &Zip<'_>, main: &str, doc: &mut Document, notes: &mut Notes) -> Result<usize, String> {
+/// A defined name's ranges (`'Sheet 1'!$A$1:$C$9,'Sheet 1'!$3:$3`) as (first row, first
+/// column, last row, last column); whole rows or columns run to the sheet's edge.
+fn name_ranges(v: &str) -> Vec<(u32, u32, u32, u32)> {
+    let mut parts = Vec::new();
+    let (mut cur, mut quoted) = (String::new(), false);
+    for c in v.chars().take(4_096) {
+        match c {
+            '\'' => {
+                quoted = !quoted;
+                cur.push(c);
+            }
+            ',' if !quoted => parts.push(std::mem::take(&mut cur)),
+            c => cur.push(c),
+        }
+    }
+    parts.push(cur);
+    parts
+        .iter()
+        .filter_map(|p| {
+            let r = p.rsplit_once('!').map_or(p.as_str(), |(_, r)| r).replace('$', "");
+            let (a, b) = r.split_once(':').unwrap_or((r.as_str(), r.as_str()));
+            if let (Some((r1, c1)), Some((r2, c2))) = (col_index(a), col_index(b)) {
+                return Some((r1.min(r2), c1.min(c2), r1.max(r2), c1.max(c2)));
+            }
+            if let (Ok(r1), Ok(r2)) = (a.parse::<u32>(), b.parse::<u32>()) {
+                let (r1, r2) = (r1.clamp(1, MAX_ROW), r2.clamp(1, MAX_ROW));
+                return Some((r1.min(r2), 1, r1.max(r2), MAX_COL));
+            }
+            let (Some((_, c1)), Some((_, c2))) = (col_index(&format!("{a}1")), col_index(&format!("{b}1"))) else { return None };
+            Some((1, c1.min(c2), MAX_ROW, c1.max(c2)))
+        })
+        .take(64)
+        .collect()
+}
+
+/// Today's date and the time as headers print them (`&D`, `&T`), and as a date serial, in UTC.
+fn now(date1904: bool) -> (String, String, f64) {
+    let secs = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let t = i64::try_from(secs).ok().and_then(|s| chrono::DateTime::from_timestamp(s, 0)).unwrap_or_default();
+    // Serial 25 569 is 1970-01-01 in the 1900 system; the 1904 system counts 1 462 days fewer.
+    let serial = secs as f64 / 86_400.0 + 25_569.0 - if date1904 { 1_462.0 } else { 0.0 };
+    (t.format("%Y-%m-%d").to_string(), t.format("%-I:%M %p").to_string(), serial)
+}
+
+pub(crate) fn convert(zip: &Zip<'_>, main: &str, name: &str, doc: &mut Document, notes: &mut Notes) -> Result<usize, String> {
     let rels = Rels::load(zip, main)?;
     let text = zip.text(main)?.ok_or_else(|| format!("{main} is missing"))?;
     let wb = xml::parse(&text).map_err(|e| format!("{main}: {e}"))?;
@@ -1249,8 +1637,28 @@ pub(crate) fn convert(zip: &Zip<'_>, main: &str, doc: &mut Document, notes: &mut
     let theme = theme_colors(zip, &rels);
     let styles = load_styles(zip, &rels, &theme, notes)?;
     let shared = shared_strings(zip, &rels)?;
+    let (date, time, today) = now(date1904);
+    let book = Book { shared: &shared, styles: &styles, theme: &theme, date1904, today };
+    // Print areas and titles are names local to a sheet, by its position in the workbook.
+    let mut areas: HashMap<usize, Vec<(u32, u32, u32, u32)>> = HashMap::new();
+    let mut titles: HashMap<usize, Vec<(u32, u32, u32, u32)>> = HashMap::new();
+    for d in child(root, "definedNames").into_iter().flat_map(|d| children(d, "definedName")) {
+        let Some(sheet) = attr_f64(d, "localSheetId").filter(|v| v.is_finite() && *v >= 0.0).map(|v| v.min(1e6) as usize) else { continue };
+        let value = d.text().unwrap_or_default();
+        match attr(d, "name") {
+            Some("_xlnm.Print_Area") => {
+                areas.insert(sheet, name_ranges(value));
+            }
+            Some("_xlnm.Print_Titles") => {
+                titles.insert(sheet, name_ranges(value));
+            }
+            _ => {}
+        }
+    }
     let mut canvas = Canvas::default();
-    for s in child(root, "sheets").into_iter().flat_map(|s| children(s, "sheet")) {
+    let mut jobs: Vec<HfJob> = Vec::new();
+    let mut hf_sheets: Vec<HfSheet> = Vec::new();
+    for (index, s) in child(root, "sheets").into_iter().flat_map(|s| children(s, "sheet")).enumerate() {
         if attr(s, "state").is_some_and(|v| v != "visible") {
             notes.add("hidden sheets, left out");
             continue;
@@ -1263,8 +1671,40 @@ pub(crate) fn convert(zip: &Zip<'_>, main: &str, doc: &mut Document, notes: &mut
             notes.add("chart sheets and macro sheets, left out");
             continue;
         }
-        let sheet = read_sheet(zip, part, &shared, &styles, date1904, notes)?;
-        draw_sheet(&mut canvas, &sheet, &styles, notes)?;
+        let mut sheet = read_sheet(zip, part, &book, doc, notes)?;
+        sheet.print_areas = areas.remove(&index).unwrap_or_default();
+        for (r1, c1, r2, c2) in titles.remove(&index).unwrap_or_default() {
+            if c1 == 1 && c2 == MAX_COL {
+                sheet.title_rows = Some((r1, r2));
+            } else if r1 == 1 && r2 == MAX_ROW {
+                sheet.title_cols = Some((c1, c2));
+            }
+        }
+        draw_sheet(&mut canvas, &sheet, &styles, notes, &mut jobs, hf_sheets.len())?;
+        hf_sheets.push(HfSheet {
+            name: attr(s, "name").unwrap_or_default().to_owned(),
+            hf: sheet.hf,
+            pictures: sheet.hf_pictures,
+            margins: sheet.margins,
+            hf_margins: sheet.hf_margins,
+        });
+    }
+    // Headers and footers, now that the page count is known: pages are numbered through the
+    // workbook, as Excel prints a whole workbook.
+    let total = canvas.pages.len();
+    let base = styles.fonts.first().map_or_else(RunStyle::default, |f| RunStyle { fam: family_of(&f.name), size: f.size, ..RunStyle::default() });
+    for job in jobs {
+        let Some(sh) = hf_sheets.get(job.sheet) else { continue };
+        let number = job.page + 1;
+        let (header, footer, suffix) = sh.hf.pick(job.first, number);
+        let Some(page) = canvas.page(job.page) else { continue };
+        let frame = hf::Frame { w: page.w, h: page.h, left: sh.margins[3], right: sh.margins[1], header: sh.hf_margins.0, footer: sh.hf_margins.1 };
+        let vars = hf::Vars { page: number, pages: total, date: &date, time: &time, file: name, sheet: &sh.name };
+        for (text, top) in [(header, true), (footer, false)] {
+            if let Some(text) = text {
+                hf::draw(page, text, top, &frame, &base, &vars, &sh.pictures, suffix, notes);
+            }
+        }
     }
     canvas.finish(doc).map_err(|e| e.to_string())
 }

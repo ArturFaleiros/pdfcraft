@@ -1,6 +1,6 @@
 # Word, PowerPoint and Excel to PDF
 
-> **Status:** M10 candidate, native import of Office Open XML · **Revision history:** 2026-10-14 first version; 2026-10-16 #2871 workflow completion and reporting; 2026-10-22 Turkish and Central European letters drawn, UI notices translated and shown only when something was approximated; 2026-10-25 review fixes (Word 2010 text boxes, nested boxes, master placeholders, merged table cells, stored column widths) and the known gaps listed; 2026-10-27 wording: what can be left out, which workflows convert off the UI thread.
+> **Status:** M10 candidate, native import of Office Open XML · **Revision history:** 2026-10-14 first version; 2026-10-16 #2871 workflow completion and reporting; 2026-10-22 Turkish and Central European letters drawn, UI notices translated and shown only when something was approximated; 2026-10-25 review fixes (Word 2010 text boxes, nested boxes, master placeholders, merged table cells, stored column widths) and the known gaps listed; 2026-10-27 wording: what can be left out, which workflows convert off the UI thread; 2026-10-28 right, centre and decimal tabs with leaders, plain table-of-contents links, paragraph borders, table-style parts, cell vertical alignment, header and footer tables, page-anchored floating tables, EMF pictures as vectors; Excel headers and footers, print titles, print areas, centring, manual breaks, page order, pictures and shapes on sheets, conditional formatting.
 
 PdfCraft opens Word (`.docx`, `.docm`, `.dotx`), PowerPoint (`.pptx`, `.pptm`, `.ppsx`, `.potx`) and
 Excel (`.xlsx`, `.xlsm`, `.xltx`) files as new, unsaved PDFs. The conversion is native Rust in
@@ -43,11 +43,18 @@ it works in the browser build too. The source file is only read.
   `basedOn` chains and document defaults, direct formatting (font family, size, bold, italic,
   underline, strike-through, colour, highlight and shading, super- and subscript, caps, hidden
   text), alignment including justification, indents and hanging indents, spacing and line
-  spacing, tab stops, numbered and bulleted lists (`numbering.xml`, nine levels, restarts),
-  tables (column grid, spans, vertical merges, cell shading, table-style and cell borders, rows
-  split across pages), inline and anchored pictures, page breaks, headers and footers per section
-  (first-page variants) with live `PAGE` and `NUMPAGES` fields, footnotes and endnotes (placed at
-  the end with their marks), equations as plain text, and text boxes' text.
+  spacing (space before kept at the top of a page a break started, dropped after a full page), left,
+  right, centre and decimal tab stops with dot, hyphen, underscore and middle-dot leaders,
+  paragraph borders (boxes shared by consecutive paragraphs, double rules) and shading, numbered
+  and bulleted lists (`numbering.xml`, nine levels, restarts), tables (column grid, spans,
+  vertical merges, cell shading, table-style and cell borders, the table style's header, total
+  and banded rows and first and last columns (`tblLook`), cell vertical alignment, rows split
+  across pages, tables floating against the page or its margins), inline and anchored pictures
+  (PNG, JPEG, and EMF drawn as vectors), page breaks, headers and footers per section
+  (first-page variants, tables laid out as tables) with live `PAGE` and `NUMPAGES` fields,
+  table-of-contents links printed without the Hyperlink style (as Word prints them), footnotes
+  and endnotes (placed at the end with their marks), equations as plain text, and text boxes'
+  text.
 - **PowerPoint:** one page per visible slide at the slide size; backgrounds (solid, gradient as one
   colour, picture); master and layout decorations; placeholder geometry and text styles inherited
   from the layout and master (`titleStyle`, `bodyStyle`, list styles); theme colours with
@@ -61,8 +68,17 @@ it works in the browser build too. The source file is only read.
   with their number formats (General, decimals and thousands, percentages, scientific, currency
   tags such as `[$R$-416]` with the locale's decimal comma, dates and times with English or
   Portuguese month and day names, sections for negatives and zero, `[Red]`); fonts, fills,
-  borders, horizontal and vertical alignment, indents, wrapped text, merged cells, overflow into
-  empty neighbours and `###` for numbers that don't fit. Formulas show their saved results.
+  borders, horizontal and vertical alignment, indents, wrapped text (across a merged range's whole
+  width), merged cells, overflow into empty neighbours and `###` for numbers that don't fit.
+  Formulas show their saved results. Print setup: headers and footers (`&L &C &R`, `&P &N &D &T
+  &F &A`, fonts, sizes, colours, bold/italic/underline, first-page and odd/even variants, `&G`
+  pictures from `legacyDrawingHF`), print areas (each on its own pages), print title rows and
+  columns, horizontal and vertical centring, manual row and column breaks, over-then-down page
+  order. Pictures (PNG, JPEG, EMF) and shapes (rectangles, rounded rectangles, ellipses, arrows,
+  triangles, diamonds, lines with arrowheads, with fill, outline and text) on sheets, at their
+  anchors. Conditional formatting: cell value, top/bottom N and N %, above/below average,
+  duplicate and unique values, text, blanks and errors, time periods, colour scales, data bars and
+  icon sets, by priority with stop-if-true.
 
 ## What is approximated
 
@@ -80,28 +96,35 @@ states the standard-font substitution. Nothing in the source is changed.
   build accented letters from a base letter and a plain accent and can't build these. They, and
   everything the faces can't draw at all (Greek, Cyrillic, CJK, Arabic, emoji…), are written as
   `[U+XXXX]` and counted; they are never replaced by `?`. Embedding real faces would cover them.
-- **Not drawn, shown as outlined boxes:** charts, SmartArt, embedded objects, and pictures in a
-  format PdfCraft can't decode (EMF, WMF, SVG) or linked rather than embedded.
+- **Not drawn, shown as outlined boxes:** charts, SmartArt, embedded objects without an EMF or
+  bitmap preview, and pictures in a format PdfCraft can't decode (WMF, SVG) or linked rather than
+  embedded. EMF pictures are played as vectors (pens, brushes, fonts, rectangles, rounded
+  rectangles, ellipses, polygons, polylines, Béziers, paths, text, mapping modes and transforms);
+  their bitmaps, clipping regions and arcs are skipped.
 - **Simplified:** gradients use their middle colour; arcs in custom shapes are drawn straight;
   preset shapes without a specific outline use their bounding rectangle; vertical text is drawn
   horizontally; text boxes in Word join the text flow after their paragraph; multi-column
-  sections are set in one column; Excel charts and pictures, chart sheets, headers and footers,
-  and print areas are not used.
+  sections are set in one column; Excel chart sheets are left out; `&D`/`&T` print the date and
+  time in UTC as `yyyy-mm-dd` and `h:mm AM/PM`; pages are numbered through the whole workbook (a
+  sheet's own first page number is not used, as when Excel prints a workbook); printed row and
+  column headings are not drawn.
 - **Known gaps, not yet handled** (the source file is never changed, but some content is
   simplified or left out of the PDF, and the conversion report notes the content-specific cases):
-  - Word: right, centre and decimal tab stops are set as left stops, so a "title ⇥ page" line in a
-    table of contents or footer can wrap; dot leaders are not drawn; a table style's paragraph
-    spacing and banded shading are not applied to its cells; tables in headers and footers are
-    set as one line per row; a picture's crop (`srcRect`) is ignored, so a cropped picture is
-    squeezed; paragraph borders (`pBdr`) and paragraph shading inside table cells are not drawn.
+  - Word: a picture's crop (`srcRect`) is ignored, so a cropped picture is squeezed; paragraph
+    borders and shading inside table cells are not drawn; tables floating in the text
+    (`vertAnchor="text"`) stay in the flow without text wrapping around them; `STYLEREF`,
+    `DATE` and `PRINTDATE` keep their saved results; dotted, dashed and wavy borders are drawn
+    solid.
   - PowerPoint: transparency (`alpha`) is ignored, so a translucent overlay is drawn opaque;
     curved and bent connectors are drawn as boxes; Wingdings bullets show as the letters they are
     stored as; text in a flipped shape is flipped with it; placeholders inherit no fill or
     outline from the layout or master.
   - Excel: a number that just fits its column in Calibri can be shown as `####`, as Helvetica is
-    wider; General numbers aren't shortened to fit; outside borders of merged ranges and their
-    wrap width come from the first cell only; rows without a stated height aren't grown for
-    large fonts; ISO date cells (`t="d"`) are left empty.
+    wider; General numbers aren't shortened to fit; outside borders of merged ranges come from
+    the first cell only; rows without a stated height aren't grown for large fonts; ISO date
+    cells (`t="d"`) are left empty; conditional formatting rules that need a formula
+    (`expression`) are left out and reported; charts on sheets are outlined boxes; grouped
+    shapes are left out.
   - Desktop app: Create PDF from multiple files converts each file on the UI thread (as it does
     images and text), so a large Office file pauses the window while it converts; File ▸ Open
     converts off the UI thread.
@@ -123,6 +146,10 @@ guard, and in File ▸ Open it runs off the UI thread. Macros (`vbaProject.bin`)
 `crates/create/src/office/tests.rs` builds Word, PowerPoint and Excel packages from synthetic text
 and pixels in the test itself (no committed fixture) and checks the reopened PDF: page sizes,
 fonts, text, list labels, table cells, images, header page numbers, inherited placeholder styles,
-theme colours, autofit, number formats, merged cells, hidden content, and hostile input.
+theme colours, autofit, number formats, merged cells, hidden content, tab stops and leaders,
+table-of-contents links, paragraph borders, table-style parts, header tables, floating tables,
+EMF pictures, Excel headers and footers, print titles and areas, conditional formatting, sheet
+pictures and shapes, and hostile input (`emf.rs`, `xlsx_hf.rs`, `xlsx_cf.rs` have their own unit
+tests, hostile metafiles included).
 `crates/automation/tests/it/automation.rs::creating_pdfs_from_word_and_powerpoint_natively` exports a
 PDF to `.docx` and `.pptx` with PdfCraft's own exporter and imports them back through `doc_create`.

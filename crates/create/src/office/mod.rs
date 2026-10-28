@@ -7,15 +7,19 @@
 //! stays searchable. Latin letters beyond WinAnsi (Turkish, Central European, Baltic, Romanian)
 //! are drawn from the same faces through a second encoding ([`latin`]). Characters those faces
 //! can't draw at all are written as `[U+XXXX]` and counted in the [`OfficeReport`], never set as
-//! `?`. Content the importer can't draw (charts, SmartArt, vector images) is replaced by an
-//! outlined box of the same size and counted too.
+//! `?`. EMF pictures are drawn as vectors ([`emf`]). Content the importer can't draw (charts,
+//! SmartArt, WMF and SVG images) is replaced by an outlined box of the same size and counted too.
 
 mod canvas;
 mod docx;
+mod emf;
 mod flow;
 mod latin;
 mod pptx;
 mod xlsx;
+mod xlsx_cf;
+mod xlsx_drawing;
+mod xlsx_hf;
 mod xml;
 pub(crate) mod zip;
 
@@ -291,7 +295,7 @@ pub fn from_office(name: &str, bytes: &[u8]) -> Result<(Document, OfficeReport),
     let pages = match kind {
         OfficeKind::Word => docx::convert(&zip, &main, &mut doc, &mut notes),
         OfficeKind::PowerPoint => pptx::convert(&zip, &main, &mut doc, &mut notes),
-        OfficeKind::Excel => xlsx::convert(&zip, &main, &mut doc, &mut notes),
+        OfficeKind::Excel => xlsx::convert(&zip, &main, name, &mut doc, &mut notes),
     }
     .map_err(fail)?;
     crate::set_title(&mut doc, name.rsplit_once('.').map_or(name, |(s, _)| s));

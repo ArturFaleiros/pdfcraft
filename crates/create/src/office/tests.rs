@@ -81,6 +81,8 @@ fn docx_numbered(body: &str, extra: &[(&str, &[u8])], doc_rels: &[(&str, &str, &
         <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
         <w:style w:type="paragraph" w:styleId="Heading1"><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:before="240"/></w:pPr><w:rPr><w:rFonts w:ascii="Cambria"/><w:b/><w:sz w:val="32"/><w:color w:val="2F5496"/></w:rPr></w:style>
         <w:style w:type="table" w:styleId="TableGrid"><w:tblPr><w:tblBorders><w:top w:val="single" w:sz="4"/><w:left w:val="single" w:sz="4"/><w:bottom w:val="single" w:sz="4"/><w:right w:val="single" w:sz="4"/><w:insideH w:val="single" w:sz="4"/><w:insideV w:val="single" w:sz="4"/></w:tblBorders></w:tblPr></w:style>
+        <w:style w:type="character" w:styleId="Hyperlink"><w:name w:val="Hyperlink"/><w:rPr><w:color w:val="0563C1"/><w:u w:val="single"/></w:rPr></w:style>
+        <w:style w:type="table" w:styleId="Banded"><w:name w:val="Banded"/><w:tblStylePr w:type="firstRow"><w:rPr><w:b/><w:color w:val="FFFFFF"/></w:rPr><w:tcPr><w:shd w:val="clear" w:fill="4472C4"/></w:tcPr></w:tblStylePr><w:tblStylePr w:type="band1Horz"><w:tcPr><w:shd w:val="clear" w:fill="D9E2F3"/></w:tcPr></w:tblStylePr></w:style>
         <w:style w:type="paragraph" w:styleId="Loop"><w:basedOn w:val="Loop2"/></w:style><w:style w:type="paragraph" w:styleId="Loop2"><w:basedOn w:val="Loop"/></w:style></w:styles>"#
     );
     let standard = format!(
@@ -345,17 +347,25 @@ fn xlsx_with(sheet: &str, extra_sheets: &[(&str, &str, bool)], workbook_pr: &str
 
 /// [`xlsx_with`] with `format` as the number format of style 1 (`s="1"`).
 fn xlsx_styled(sheet: &str, extra_sheets: &[(&str, &str, bool)], workbook_pr: &str, format: &str) -> Vec<u8> {
-    xlsx_full(sheet, extra_sheets, workbook_pr, format, None)
+    xlsx_full(sheet, extra_sheets, workbook_pr, format, None, &[])
 }
 
-/// [`xlsx_styled`] with `shared` (the `<si>` elements) as the shared strings when given.
-fn xlsx_full(sheet: &str, extra_sheets: &[(&str, &str, bool)], workbook_pr: &str, format: &str, shared: Option<&str>) -> Vec<u8> {
+/// [`xlsx_styled`] with `shared` (the `<si>` elements) as the shared strings when given, and
+/// `extra` parts (drawings, pictures, relationships) added to the package.
+fn xlsx_full(
+    sheet: &str,
+    extra_sheets: &[(&str, &str, bool)],
+    workbook_pr: &str,
+    format: &str,
+    shared: Option<&str>,
+    extra: &[(&str, &[u8])],
+) -> Vec<u8> {
     let styles = format!(
         r#"<styleSheet xmlns="{S}"><numFmts count="2"><numFmt numFmtId="164" formatCode="{format}"/><numFmt numFmtId="165" formatCode="dd/mm/yyyy"/></numFmts>
         <fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font></fonts>
         <fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor theme="4"/></patternFill></fill></fills>
         <borders count="2"><border/><border><left style="thin"/><right style="thin"/><top style="thin"/><bottom style="medium"><color rgb="FF0000FF"/></bottom></border></borders>
-        <cellXfs count="7"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/><xf numFmtId="164" fontId="0" fillId="0" borderId="1" applyNumberFormat="1"/><xf numFmtId="165" fontId="0" fillId="0" borderId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="1"><alignment horizontal="center"/></xf><xf numFmtId="10" fontId="0" fillId="0" borderId="0"/><xf numFmtId="0" fontId="0" fillId="0" borderId="0"><alignment wrapText="1"/></xf><xf numFmtId="0" fontId="0" fillId="0" borderId="0"><alignment horizontal="general"/></xf></cellXfs></styleSheet>"#
+        <cellXfs count="7"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/><xf numFmtId="164" fontId="0" fillId="0" borderId="1" applyNumberFormat="1"/><xf numFmtId="165" fontId="0" fillId="0" borderId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="1"><alignment horizontal="center"/></xf><xf numFmtId="10" fontId="0" fillId="0" borderId="0"/><xf numFmtId="0" fontId="0" fillId="0" borderId="0"><alignment wrapText="1"/></xf><xf numFmtId="0" fontId="0" fillId="0" borderId="0"><alignment horizontal="general"/></xf></cellXfs><dxfs count="1"><dxf><font><b/></font><fill><patternFill><bgColor rgb="FFFFC7CE"/></patternFill></fill></dxf></dxfs></styleSheet>"#
     );
     let shared = match shared {
         Some(items) => format!(r#"<sst xmlns="{S}">{items}</sst>"#),
@@ -385,6 +395,7 @@ fn xlsx_full(sheet: &str, extra_sheets: &[(&str, &str, bool)], workbook_pr: &str
     parts.push(("xl/styles.xml".into(), styles.into_bytes()));
     parts.push(("xl/sharedStrings.xml".into(), shared.into_bytes()));
     parts.push(("_rels/.rels".into(), rels(&[("rId1", "officeDocument", "xl/workbook.xml")]).into_bytes()));
+    parts.extend(extra.iter().map(|(n, b)| ((*n).to_owned(), b.to_vec())));
     let refs: Vec<(&str, &[u8])> = parts.iter().map(|(n, b)| (n.as_str(), b.as_slice())).collect();
     build(&refs)
 }
@@ -1017,7 +1028,7 @@ fn cell_text_is_capped_per_sheet() {
     let long = "x".repeat(100_000);
     let rows: String = (1..=1000).map(|r| format!(r#"<row r="{r}"><c r="A{r}" t="s"><v>0</v></c></row>"#)).collect();
     let sheet = format!("<sheetData>{rows}</sheetData>");
-    let (_, report) = from_office("big.xlsx", &xlsx_full(&sheet, &[], "", "0", Some(&format!("<si><t>{long}</t></si>")))).unwrap();
+    let (_, report) = from_office("big.xlsx", &xlsx_full(&sheet, &[], "", "0", Some(&format!("<si><t>{long}</t></si>")), &[])).unwrap();
     assert!(report.notes.iter().any(|n| n.contains("cell text")), "{report:?}");
 }
 
@@ -1153,4 +1164,255 @@ fn col_ranges_hide_every_column_they_name() {
     let text = all_text(&doc);
     assert!(text.contains("(Acell)"), "{text}");
     assert!(!text.contains("(Farcell)"), "column FZZ (4628) is inside the hidden range: {text}");
+}
+
+// ── layout fidelity (tabs, borders, table styles, headers, floats, EMF, Excel print setup) ──
+
+/// The y of the `Tm` that draws `word`.
+fn y_of(text: &str, word: &str) -> f64 {
+    let at = text.find(&format!("({word})")).unwrap_or_else(|| panic!("{word} in {text}"));
+    let tm = text[..at].rfind(" Tm").unwrap();
+    text[..tm].split_whitespace().next_back().unwrap().parse().unwrap()
+}
+
+/// The fill colour (`r g b rg`) set by the `BT` that draws `word`.
+fn colour_of(text: &str, word: &str) -> String {
+    let at = text.find(&format!("({word})")).unwrap_or_else(|| panic!("{word} in {text}"));
+    let bt = text[..at].rfind("BT ").unwrap();
+    text[bt + 3..].split(" rg").next().unwrap().to_owned()
+}
+
+#[test]
+fn right_centre_and_decimal_tab_stops_place_text_at_the_stop() {
+    let toc = r#"<w:p><w:pPr><w:tabs><w:tab w:val="right" w:leader="dot" w:pos="9000"/></w:tabs></w:pPr><w:r><w:t>Capitulo</w:t></w:r><w:r><w:tab/></w:r><w:r><w:t>42</w:t></w:r></w:p>"#;
+    let more = r#"<w:p><w:pPr><w:tabs><w:tab w:val="center" w:pos="4500"/><w:tab w:val="decimal" w:pos="8000"/></w:tabs></w:pPr><w:r><w:t>a</w:t><w:tab/><w:t>Meio</w:t><w:tab/><w:t>12.5</w:t></w:r></w:p>"#;
+    let (doc, _) = from_office("tabs.docx", &docx(&format!("{toc}{more}"), &[], &[])).unwrap();
+    let doc = reopen(&doc);
+    let text = content(&doc, &pages(&doc)[0]);
+    let w = |s: &str| pdfcraft_fonts::Std14::Helvetica.text_width(s, 11.0);
+    // Stops are measured from the left margin (72 pt here).
+    let end = x_of(&text, "42") + w("42");
+    assert!((end - (72.0 + 450.0)).abs() < 0.5, "the page number ends at the right stop: {end}");
+    assert_eq!(y_of(&text, "42"), y_of(&text, "Capitulo"), "on the entry's line");
+    assert!(text.contains("(....."), "a dot leader fills the gap: {text}");
+    let mid = x_of(&text, "Meio") + w("Meio") / 2.0;
+    assert!((mid - (72.0 + 225.0)).abs() < 0.5, "centred on the centre stop: {mid}");
+    let point = x_of(&text, "12.5") + w("12");
+    assert!((point - (72.0 + 400.0)).abs() < 0.5, "the decimal point on the decimal stop: {point}");
+}
+
+#[test]
+fn table_of_contents_links_print_without_the_hyperlink_style() {
+    let link =
+        |t: &str| format!(r#"<w:hyperlink w:anchor="_Toc1"><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>{t}</w:t></w:r></w:hyperlink>"#);
+    let body = format!(
+        r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> TOC \o "1-3" \h </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>{}</w:p>
+        <w:p>{}<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p><w:p>{}</w:p>"#,
+        link("Entrada"),
+        link("Segunda"),
+        link("Fora")
+    );
+    let (doc, _) = from_office("toc.docx", &docx(&body, &[], &[])).unwrap();
+    let doc = reopen(&doc);
+    let text = content(&doc, &pages(&doc)[0]);
+    assert_eq!(colour_of(&text, "Entrada"), "0 0 0", "in the field's result, across paragraphs");
+    assert_eq!(colour_of(&text, "Segunda"), "0 0 0");
+    assert_eq!(colour_of(&text, "Fora"), "0.02 0.388 0.757", "a link after the field keeps its style");
+}
+
+#[test]
+fn paragraphs_with_the_same_borders_share_one_box() {
+    let bdr = r#"<w:pBdr><w:top w:val="single" w:sz="8" w:space="4" w:color="FF0000"/><w:left w:val="single" w:sz="8" w:space="4" w:color="FF0000"/><w:bottom w:val="single" w:sz="8" w:space="4" w:color="FF0000"/><w:right w:val="single" w:sz="8" w:space="4" w:color="FF0000"/></w:pBdr>"#;
+    let para = |t: &str| format!(r#"<w:p><w:pPr>{bdr}</w:pPr><w:r><w:t>{t}</w:t></w:r></w:p>"#);
+    let double =
+        r#"<w:p><w:pPr><w:pBdr><w:top w:val="double" w:sz="4" w:space="1" w:color="0000FF"/></w:pBdr></w:pPr><w:r><w:t>Duplo</w:t></w:r></w:p>"#;
+    let (doc, _) = from_office("b.docx", &docx(&format!("{}{}{double}", para("Um"), para("Dois")), &[], &[])).unwrap();
+    let doc = reopen(&doc);
+    let text = content(&doc, &pages(&doc)[0]);
+    let lines = |colour: &str| -> Vec<(f64, f64, f64, f64)> {
+        text.lines()
+            .filter_map(|l| {
+                let rest = l.strip_prefix(&format!("{colour} RG "))?;
+                // `w 0 J x1 y1 m x2 y2 l S`: the width and cap style come first.
+                let v: Vec<f64> = rest.split_whitespace().filter_map(|t| t.parse().ok()).collect();
+                (v.len() >= 6).then(|| (v[2], v[3], v[4], v[5]))
+            })
+            .collect()
+    };
+    let red = lines("1 0 0");
+    let horizontal = red.iter().filter(|(_, y1, _, y2)| (y1 - y2).abs() < 0.01).count();
+    assert_eq!(horizontal, 2, "one top and one bottom for the two paragraphs: {red:?}");
+    assert!(red.iter().any(|(x1, y1, x2, y2)| (x1 - x2).abs() < 0.01 && (y1 - y2).abs() > 1.0), "side borders");
+    let blue = lines("0 0 1");
+    assert_eq!(blue.len(), 2, "a double border is two lines: {blue:?}");
+}
+
+#[test]
+fn table_styles_shade_header_and_banded_rows_and_cells_align_vertically() {
+    let cell = |t: &str, extra: &str| {
+        format!(r#"<w:tc><w:tcPr>{extra}</w:tcPr><w:p><w:pPr><w:spacing w:after="0"/></w:pPr><w:r><w:t>{t}</w:t></w:r></w:p></w:tc>"#)
+    };
+    let body = format!(
+        r#"<w:tbl><w:tblPr><w:tblStyle w:val="Banded"/><w:tblLook w:firstRow="1" w:noHBand="0"/></w:tblPr><w:tblGrid><w:gridCol w:w="3000"/><w:gridCol w:w="3000"/></w:tblGrid>
+        <w:tr>{}{}</w:tr><w:tr>{}{}</w:tr><w:tr><w:trPr><w:trHeight w:val="1440" w:hRule="exact"/></w:trPr>{}{}</w:tr></w:tbl>"#,
+        cell("Cabeca", ""),
+        cell("H2", ""),
+        cell("Faixa", ""),
+        cell("F2", ""),
+        cell("Topo", ""),
+        cell("Baixo", r#"<w:vAlign w:val="bottom"/>"#)
+    );
+    let (doc, _) = from_office("t.docx", &docx(&body, &[], &[])).unwrap();
+    let doc = reopen(&doc);
+    let text = content(&doc, &pages(&doc)[0]);
+    assert!(text.contains("0.267 0.447 0.769 rg"), "the header row's shading: {text}");
+    assert!(text.contains("0.851 0.886 0.953 rg"), "the first band's shading");
+    assert_eq!(colour_of(&text, "Cabeca"), "1 1 1", "the header row's white text");
+    assert!(text.contains("/F1 11 Tf (Cabeca)"), "and bold (Helvetica-Bold): {text}");
+    assert_eq!(colour_of(&text, "Faixa"), "0 0 0");
+    let drop = y_of(&text, "Topo") - y_of(&text, "Baixo");
+    assert!(drop > 50.0, "bottom-aligned text sits at the foot of the 72 pt row: {drop}");
+}
+
+#[test]
+fn header_tables_are_laid_out_as_tables() {
+    let header = format!(
+        r#"<w:hdr xmlns:w="{W}"><w:tbl><w:tblGrid><w:gridCol w:w="4680"/><w:gridCol w:w="4680"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Esquerda</w:t></w:r></w:p></w:tc><w:tc><w:p><w:pPr><w:jc w:val="right"/></w:pPr><w:r><w:t>Direita</w:t></w:r></w:p><w:p><w:pPr><w:jc w:val="right"/></w:pPr><w:r><w:t>Segunda</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:hdr>"#
+    );
+    let body = format!(r#"{}<w:sectPr><w:headerReference w:type="default" r:id="rIdH"/></w:sectPr>"#, p("Corpo"));
+    let (doc, _) = from_office("h.docx", &docx(&body, &[("word/header1.xml", header.as_bytes())], &[("rIdH", "header", "header1.xml")])).unwrap();
+    let doc = reopen(&doc);
+    let text = content(&doc, &pages(&doc)[0]);
+    assert_eq!(y_of(&text, "Esquerda"), y_of(&text, "Direita"), "the two cells side by side");
+    assert!(x_of(&text, "Direita") > 450.0, "right-aligned in the right-hand cell: {}", x_of(&text, "Direita"));
+    assert!(y_of(&text, "Segunda") < y_of(&text, "Direita"), "the cell's second paragraph below its first");
+}
+
+#[test]
+fn space_before_is_kept_on_the_first_page_and_bottom_floating_tables_sit_at_the_margin() {
+    let body = format!(
+        r#"<w:p><w:pPr><w:spacing w:before="2400"/></w:pPr><w:r><w:t>Titulo</w:t></w:r></w:p>
+        <w:tbl><w:tblPr><w:tblpPr w:horzAnchor="margin" w:tblpYSpec="bottom"/></w:tblPr><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Rodape</w:t></w:r></w:p></w:tc></w:tr></w:tbl>{}"#,
+        p("Depois")
+    );
+    let (doc, _) = from_office("f.docx", &docx(&body, &[], &[])).unwrap();
+    let doc = reopen(&doc);
+    let text = content(&doc, &pages(&doc)[0]);
+    assert!(y_of(&text, "Titulo") < 792.0 - 72.0 - 120.0, "120 pt before the first paragraph: {}", y_of(&text, "Titulo"));
+    assert!(y_of(&text, "Rodape") < 72.0 + 30.0, "the table ends at the bottom margin: {}", y_of(&text, "Rodape"));
+    assert!(y_of(&text, "Depois") < y_of(&text, "Titulo") && y_of(&text, "Depois") > 500.0, "the text goes on where it was");
+}
+
+#[test]
+fn emf_pictures_are_drawn_as_vector_forms() {
+    let emf = super::emf::tests::emf(&super::emf::tests::logo_records());
+    let body = r#"<w:p><w:r><w:drawing><wp:inline><wp:extent cx="1270000" cy="635000"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:embed="rIdE"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"#;
+    let (doc, report) = from_office("e.docx", &docx(body, &[("word/media/image1.emf", &emf)], &[("rIdE", "image", "media/image1.emf")])).unwrap();
+    assert!(!report.notes.iter().any(|n| n.contains("empty boxes")), "{report:?}");
+    let doc = reopen(&doc);
+    let pg = pages(&doc);
+    let xo = pg[0].get(b"Resources").unwrap().as_dict().unwrap().get(b"XObject").unwrap().as_dict().unwrap().clone();
+    let form = doc.resolve(xo.get(b"Im0").unwrap());
+    let Object::Stream(s) = &*form else { panic!("a stream") };
+    assert_eq!(s.dict.name(b"Subtype"), Some(&b"Form"[..]));
+    assert!(String::from_utf8_lossy(&s.decoded().unwrap()).contains("(Logo) Tj"));
+}
+
+/// A worksheet's relationships part.
+fn sheet_rels(items: &[(&str, &str, &str)]) -> String {
+    rels(items)
+}
+
+#[test]
+fn excel_headers_and_footers_print_fields_and_pictures() {
+    let image = png(8, 4);
+    let vml = r#"<xml xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office"><v:shape id="LH" style="position:absolute;width:40pt;height:20pt"><v:imagedata o:relid="rId1" o:title="logo"/></v:shape></xml>"#;
+    let sheet = r#"<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Um</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>Dois</t></is></c></row></sheetData>
+      <headerFooter><oddHeader>&amp;L&amp;G&amp;C&amp;"Arial,Bold"Relatorio&amp;R&amp;A</oddHeader><oddFooter>&amp;CPagina &amp;P de &amp;N</oddFooter></headerFooter>
+      <rowBreaks count="1" manualBreakCount="1"><brk id="1" max="16383" man="1"/></rowBreaks><legacyDrawingHF r:id="rIdV"/>"#;
+    let rels_xml = sheet_rels(&[("rIdV", "vmlDrawing", "../drawings/vmlDrawing1.vml")]);
+    let vml_rels = sheet_rels(&[("rId1", "image", "../media/image1.png")]);
+    let extra: [(&str, &[u8]); 4] = [
+        ("xl/worksheets/_rels/sheet1.xml.rels", rels_xml.as_bytes()),
+        ("xl/drawings/vmlDrawing1.vml", vml.as_bytes()),
+        ("xl/drawings/_rels/vmlDrawing1.vml.rels", vml_rels.as_bytes()),
+        ("xl/media/image1.png", &image),
+    ];
+    let (doc, report) = from_office("hf.xlsx", &xlsx_full(sheet, &[], "", "0", None, &extra)).unwrap();
+    assert_eq!(report.pages, 2, "the manual break starts a page: {report:?}");
+    let doc = reopen(&doc);
+    let pg = pages(&doc);
+    let first = content(&doc, &pg[0]);
+    let second = content(&doc, &pg[1]);
+    assert!(first.contains("(Relatorio)") && first.contains("(Vendas)"), "title and sheet name: {first}");
+    assert!(first.contains("(Pagina 1 de 2)") && second.contains("(Pagina 2 de 2)"), "page fields: {second}");
+    assert!(first.contains("/Im0 Do"), "the header picture");
+    assert!(second.contains("(Dois)") && !second.contains("(Um)"));
+}
+
+#[test]
+fn excel_print_titles_repeat_and_print_areas_print_alone_centred() {
+    let rows: String =
+        (1..=80).map(|r| format!(r#"<row r="{r}" ht="15" customHeight="1"><c r="A{r}" t="inlineStr"><is><t>Linha{r}</t></is></c></row>"#)).collect();
+    let titles = r#"<definedNames><definedName name="_xlnm.Print_Titles" localSheetId="0">Vendas!$1:$1</definedName></definedNames>"#;
+    let (doc, report) = from_office("t.xlsx", &xlsx_with(&format!("<sheetData>{rows}</sheetData>"), &[], titles)).unwrap();
+    assert!(report.pages >= 2, "{report:?}");
+    let doc = reopen(&doc);
+    let second = content(&doc, &pages(&doc)[1]);
+    assert!(second.contains("(Linha1)") && second.contains("(Linha80)"), "the title row on the second page too: {second}");
+    assert!(y_of(&second, "Linha1") > y_of(&second, "Linha80"), "at its top");
+
+    let sheet = r#"<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Dentro</t></is></c><c r="B1" t="inlineStr"><is><t>Fora</t></is></c></row><row r="5"><c r="C5" t="inlineStr"><is><t>Segunda</t></is></c></row></sheetData><printOptions horizontalCentered="1"/>"#;
+    let areas =
+        r#"<definedNames><definedName name="_xlnm.Print_Area" localSheetId="0">'Vendas'!$A$1:$A$1,'Vendas'!$C$5</definedName></definedNames>"#;
+    let (doc, report) = from_office("a.xlsx", &xlsx_with(sheet, &[], areas)).unwrap();
+    assert_eq!(report.pages, 2, "each print area on its own page: {report:?}");
+    let doc = reopen(&doc);
+    let text = all_text(&doc);
+    assert!(text.contains("(Dentro)") && text.contains("(Segunda)") && !text.contains("(Fora)"), "{text}");
+    let first = content(&doc, &pages(&doc)[0]);
+    assert!(first.contains(" cm\n"), "moved to the middle of the page: {first}");
+}
+
+#[test]
+fn conditional_formatting_fills_matching_cells() {
+    // The range ends on the sheet's last row: walking past it once panicked.
+    let sheet = r#"<sheetData><row r="1"><c r="A1"><v>3</v></c><c r="B1"><v>1</v></c></row><row r="2"><c r="A2"><v>7</v></c><c r="B2"><v>9</v></c></row></sheetData>
+      <conditionalFormatting sqref="A1:A2"><cfRule type="cellIs" dxfId="0" priority="1" operator="greaterThan"><formula>5</formula></cfRule></conditionalFormatting>
+      <conditionalFormatting sqref="B1:B2"><cfRule type="colorScale" priority="2"><colorScale><cfvo type="min"/><cfvo type="max"/><color rgb="FFFFFFFF"/><color rgb="FF00FF00"/></colorScale></cfRule></conditionalFormatting>
+      <conditionalFormatting sqref="C1:C2"><cfRule type="expression" dxfId="0" priority="3"><formula>MOD(C1,2)=0</formula></cfRule></conditionalFormatting>"#;
+    let (doc, report) = from_office("cf.xlsx", &xlsx(sheet, &[])).unwrap();
+    assert!(report.notes.iter().any(|n| n.contains("need a formula")), "{report:?}");
+    let doc = reopen(&doc);
+    let text = content(&doc, &pages(&doc)[0]);
+    assert_eq!(text.matches("1 0.78 0.808 rg").count(), 1, "only the cell over 5 is filled: {text}");
+    assert!(text.contains("/F1 11 Tf (7)"), "and bold");
+    assert!(text.contains("0 1 0 rg") && text.contains("1 1 1 rg"), "the colour scale's ends");
+}
+
+#[test]
+fn excel_sheet_pictures_and_shapes_are_drawn_where_they_are_anchored() {
+    let image = png(10, 10);
+    const XDR: &str = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing";
+    let drawing = format!(
+        r#"<xdr:wsDr xmlns:xdr="{XDR}" xmlns:a="{A}" xmlns:r="{R}">
+        <xdr:oneCellAnchor><xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:ext cx="635000" cy="635000"/><xdr:pic><xdr:blipFill><a:blip r:embed="rId1"/></xdr:blipFill><xdr:spPr/></xdr:pic><xdr:clientData/></xdr:oneCellAnchor>
+        <xdr:twoCellAnchor><xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>30</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>3</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>34</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:sp><xdr:spPr><a:prstGeom prst="roundRect"/><a:solidFill><a:srgbClr val="4472C4"/></a:solidFill></xdr:spPr><xdr:txBody><a:bodyPr anchor="ctr"/><a:p><a:pPr algn="ctr"/><a:r><a:rPr sz="1000"/><a:t>Forma</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:twoCellAnchor>
+        <xdr:oneCellAnchor><xdr:from><xdr:col>5</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:ext cx="12700000" cy="12700000"/><xdr:graphicFrame><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"/></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:oneCellAnchor></xdr:wsDr>"#
+    );
+    let sheet = r#"<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Dados</t></is></c></row></sheetData><drawing r:id="rIdD"/>"#;
+    let rels_xml = sheet_rels(&[("rIdD", "drawing", "../drawings/drawing1.xml")]);
+    let drawing_rels = sheet_rels(&[("rId1", "image", "../media/image1.png")]);
+    let extra: [(&str, &[u8]); 4] = [
+        ("xl/worksheets/_rels/sheet1.xml.rels", rels_xml.as_bytes()),
+        ("xl/drawings/drawing1.xml", drawing.as_bytes()),
+        ("xl/drawings/_rels/drawing1.xml.rels", drawing_rels.as_bytes()),
+        ("xl/media/image1.png", &image),
+    ];
+    let (doc, report) = from_office("d.xlsx", &xlsx_full(sheet, &[], "", "0", None, &extra)).unwrap();
+    assert!(report.notes.iter().any(|n| n.contains("charts on sheets")), "{report:?}");
+    let doc = reopen(&doc);
+    let text = all_text(&doc);
+    assert!(text.contains("/Im0 Do") && text.contains("(Forma)"), "the picture and the shape's text: {text}");
+    assert!(text.contains("0.267 0.447 0.769 rg"), "the shape's fill");
 }

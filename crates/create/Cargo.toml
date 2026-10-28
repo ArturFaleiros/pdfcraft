@@ -26,6 +26,8 @@ flate2 = { workspace = true }
 roxmltree = "0.20"
 # Excel date serials become calendar dates through chrono (no hand-rolled calendar code).
 chrono = { workspace = true }
+# The current date and time for Excel headers and footers (`&D`, `&T`), in the browser too.
+web-time = { workspace = true }
 
 [dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg"] }

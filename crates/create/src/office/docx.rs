@@ -10,7 +10,7 @@ use pdfcraft_cos::{Document, ObjRef};
 use roxmltree::Node;
 
 use super::canvas::{Canvas, Page};
-use super::flow::{self, Align, Field, Inline, Laid, LineRule, Para, fin};
+use super::flow::{self, Align, Field, Inline, Laid, LineRule, Para, ParaBorders, Rule, TabKind, TabStop, fin};
 use super::xml::{self, Rels, attr, attr_f64, child, children, flag, is, rel_attr};
 use super::zip::Zip;
 use super::{Notes, RunStyle, family_of, hex_color};
@@ -155,11 +155,14 @@ struct PPr {
     after: Option<f64>,
     line: Option<LineRule>,
     num: Option<(String, usize)>,
-    tabs: Vec<(f64, bool)>,
+    /// Tab stops set (`Some`) or cleared (`None`) at a position, in document order.
+    tabs: Vec<(f64, Option<TabStop>)>,
     page_break_before: Option<bool>,
     shade: Option<Option<[f64; 3]>>,
     keep_next: Option<bool>,
     contextual: Option<bool>,
+    /// Paragraph borders by side (top, left, bottom, right, between); `Some(None)` = none.
+    borders: [Option<Option<Rule>>; 5],
 }
 
 impl PPr {
@@ -168,10 +171,15 @@ impl PPr {
             ($($f:ident),*) => { $( if o.$f.is_some() { self.$f = o.$f.clone(); } )* };
         }
         take!(style, align, left, right, first, before, after, line, num, page_break_before, shade, keep_next, contextual);
-        for (pos, clear) in &o.tabs {
+        for (mine, theirs) in self.borders.iter_mut().zip(o.borders) {
+            if theirs.is_some() {
+                *mine = theirs;
+            }
+        }
+        for (pos, stop) in &o.tabs {
             self.tabs.retain(|(p, _)| (p - pos).abs() > 0.5);
-            if !clear {
-                self.tabs.push((*pos, false));
+            if stop.is_some() {
+                self.tabs.push((*pos, *stop));
             }
         }
     }
@@ -231,8 +239,8 @@ impl PPr {
                 }
                 "tabs" => {
                     for t in children(c, "tab") {
-                        if let Some(pos) = attr_f64(t, "pos") {
-                            p.tabs.push((twips(pos), attr(t, "val") == Some("clear")));
+                        if let Some(pos) = attr_f64(t, "pos").map(twips).filter(|p| p.is_finite()) {
+                            p.tabs.push((pos, tab_stop(t, pos)));
                         }
                     }
                 }
@@ -240,11 +248,64 @@ impl PPr {
                 "keepNext" => p.keep_next = Some(flag(val)),
                 "contextualSpacing" => p.contextual = Some(flag(val)),
                 "shd" => p.shade = Some(attr(c, "fill").filter(|f| *f != "auto").and_then(hex_color)),
+                "pBdr" => {
+                    for (slot, name) in p.borders.iter_mut().zip(["top", "left", "bottom", "right", "between"]) {
+                        let side = child(c, name).or_else(|| match name {
+                            "left" => child(c, "start"),
+                            "right" => child(c, "end"),
+                            _ => None,
+                        });
+                        if let Some(side) = side {
+                            *slot = Some(rule(side));
+                        }
+                    }
+                }
                 _ => {}
             }
         }
         p
     }
+
+    fn para_borders(&self) -> Option<ParaBorders> {
+        let [top, left, bottom, right, between] = self.borders.map(Option::flatten);
+        let b = ParaBorders { top, bottom, left, right, between };
+        (b != ParaBorders::default()).then_some(b)
+    }
+}
+
+/// A paragraph border side (`w:top`, `w:left`… in `w:pBdr`); `None` when it says none.
+fn rule(n: Node<'_, '_>) -> Option<Rule> {
+    let val = attr(n, "val").unwrap_or("single");
+    if matches!(val, "nil" | "none") {
+        return None;
+    }
+    // Sizes are eighths of a point, spaces whole points.
+    let width = attr_f64(n, "sz").map_or(0.5, |s| fin(s / 8.0, 0.5).clamp(0.25, 6.0));
+    let space = attr_f64(n, "space").map_or(0.0, |s| fin(s, 0.0).clamp(0.0, 31.0));
+    let color = attr(n, "color").filter(|c| *c != "auto").and_then(hex_color).unwrap_or([0.0; 3]);
+    let double = val.starts_with("double") || val.starts_with("thinThick") || val.starts_with("thickThin") || val == "triple";
+    // A double border's size is each line's: the pair and the gap between take three.
+    Some(Rule { width: if double { width * 3.0 } else { width }, color, space, double })
+}
+
+/// A `w:tab` stop at `pos` points; `None` when it clears an inherited stop. Bar tabs draw a
+/// line rather than stopping text, so they are not stops.
+fn tab_stop(t: Node<'_, '_>, pos: f64) -> Option<TabStop> {
+    let kind = match attr(t, "val") {
+        Some("clear" | "bar") => return None,
+        Some("center") => TabKind::Center,
+        Some("right" | "end") => TabKind::Right,
+        Some("decimal") => TabKind::Decimal,
+        _ => TabKind::Left,
+    };
+    let leader = match attr(t, "leader") {
+        Some("dot") => Some('.'),
+        Some("hyphen") => Some('-'),
+        Some("underscore" | "heavy") => Some('_'),
+        Some("middleDot") => Some('\u{b7}'),
+        _ => None,
+    };
+    Some(TabStop { pos, kind, leader })
 }
 
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
@@ -294,12 +355,47 @@ impl Borders {
     }
 }
 
+/// Formatting a table style gives the whole table or one part of it (`w:tblStylePr`): the
+/// header row, banded rows, the first column…
+#[derive(Clone, Default, Debug)]
+struct Cond {
+    p: PPr,
+    r: RPr,
+    shade: Option<[f64; 3]>,
+    borders: Option<Borders>,
+}
+
+impl Cond {
+    fn parse(n: Node<'_, '_>) -> Cond {
+        Cond {
+            p: child(n, "pPr").map(PPr::parse).unwrap_or_default(),
+            r: child(n, "rPr").map(RPr::parse).unwrap_or_default(),
+            shade: xml::path(n, &["tcPr", "shd"]).and_then(|s| attr(s, "fill")).filter(|f| *f != "auto").and_then(hex_color),
+            borders: xml::path(n, &["tcPr", "tcBorders"]).map(Borders::parse),
+        }
+    }
+
+    fn merge(&mut self, o: &Cond) {
+        self.p.merge(&o.p);
+        self.r.merge(&o.r);
+        if o.shade.is_some() {
+            self.shade = o.shade;
+        }
+        if let Some(ob) = &o.borders {
+            self.borders.get_or_insert_with(Borders::default).merge(ob);
+        }
+    }
+}
+
 #[derive(Clone, Default, Debug)]
 struct StyleDef {
     based_on: Option<String>,
     p: PPr,
     r: RPr,
     borders: Option<Borders>,
+    /// A table style's cell shading for the whole table, and its parts by `w:type`.
+    table: Option<Cond>,
+    parts: Vec<(String, Cond)>,
 }
 
 struct Theme {
@@ -313,6 +409,8 @@ struct Styles {
     by_id: HashMap<String, StyleDef>,
     default_para: Option<String>,
     default_table: Option<String>,
+    /// The character style named "Hyperlink".
+    hyperlink: Option<String>,
 }
 
 impl Styles {
@@ -334,9 +432,15 @@ impl Styles {
         out
     }
 
-    fn para_style(&self, id: Option<&str>) -> (PPr, RPr) {
+    /// A paragraph style's properties over the document defaults and, in a table cell, the
+    /// table style's (`layer`).
+    fn para_style(&self, id: Option<&str>, layer: Option<&(PPr, RPr)>) -> (PPr, RPr) {
         let mut p = self.p_default.clone();
         let mut r = self.r_default.clone();
+        if let Some((lp, lr)) = layer {
+            p.merge(lp);
+            r.merge(lr);
+        }
         if let Some(id) = id.or(self.default_para.as_deref()) {
             for s in self.chain(id) {
                 p.merge(&s.p);
@@ -352,6 +456,25 @@ impl Styles {
             r.merge(&s.r);
         }
         r
+    }
+
+    /// A table style's formatting for the whole table and for each of its parts, through its
+    /// `basedOn` chain.
+    fn table_parts(&self, id: Option<&str>) -> (Cond, Vec<(String, Cond)>) {
+        let mut whole = Cond::default();
+        let mut parts: Vec<(String, Cond)> = Vec::new();
+        if let Some(id) = id.or(self.default_table.as_deref()) {
+            for s in self.chain(id) {
+                whole.merge(&Cond { p: s.p.clone(), r: s.r.clone(), ..s.table.clone().unwrap_or_default() });
+                for (ty, c) in &s.parts {
+                    match parts.iter_mut().find(|(t, _)| t == ty) {
+                        Some((_, mine)) => mine.merge(c),
+                        None => parts.push((ty.clone(), c.clone())),
+                    }
+                }
+            }
+        }
+        (whole, parts)
     }
 
     fn table_borders(&self, id: Option<&str>) -> Borders {
@@ -383,7 +506,14 @@ fn load_theme(zip: &Zip<'_>, rels: &Rels) -> Theme {
 }
 
 fn load_styles(zip: &Zip<'_>, rels: &Rels) -> Result<Styles, String> {
-    let mut s = Styles { p_default: PPr::default(), r_default: RPr::default(), by_id: HashMap::new(), default_para: None, default_table: None };
+    let mut s = Styles {
+        p_default: PPr::default(),
+        r_default: RPr::default(),
+        by_id: HashMap::new(),
+        default_para: None,
+        default_table: None,
+        hyperlink: None,
+    };
     let Some(part) = rels.of_type("styles") else { return Ok(s) };
     let Some(text) = zip.text(part)? else { return Ok(s) };
     let d = xml::parse(&text).map_err(|e| format!("{part}: {e}"))?;
@@ -404,7 +534,13 @@ fn load_styles(zip: &Zip<'_>, rels: &Rels) -> Result<Styles, String> {
             p: child(st, "pPr").map(PPr::parse).unwrap_or_default(),
             r: child(st, "rPr").map(RPr::parse).unwrap_or_default(),
             borders: xml::path(st, &["tblPr", "tblBorders"]).map(Borders::parse),
+            table: (ty == "table").then(|| Cond { p: PPr::default(), r: RPr::default(), ..Cond::parse(st) }),
+            // A hostile style can't multiply the work: Word defines thirteen parts.
+            parts: children(st, "tblStylePr").take(16).filter_map(|c| Some((attr(c, "type")?.to_owned(), Cond::parse(c)))).collect(),
         };
+        if ty == "character" && child(st, "name").and_then(|n| attr(n, "val")).is_some_and(|n| n.eq_ignore_ascii_case("hyperlink")) {
+            s.hyperlink = Some(id.to_owned());
+        }
         if flag(attr(st, "default")) && attr(st, "default").is_some() {
             match ty {
                 "paragraph" => s.default_para = Some(id.to_owned()),
@@ -574,6 +710,8 @@ struct Cell {
     borders: Borders,
     /// `Some(true)` starts a vertical merge, `Some(false)` continues one.
     vmerge: Option<bool>,
+    /// Where the content sits in a taller cell: 0 top, 0.5 centre, 1 bottom.
+    valign: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -591,6 +729,23 @@ struct Table {
     indent: f64,
     center: bool,
     pad: (f64, f64),
+    /// A floating table placed against the page or its margins (`w:tblpPr`), drawn there
+    /// without moving the text.
+    float: Option<Float>,
+}
+
+/// Where a floating table goes: its top as a fraction of the room left (0 top, 0.5 centre,
+/// 1 bottom) or an offset in points, inside the margins or the whole page.
+#[derive(Clone, Copy, Debug)]
+struct Float {
+    y: FloatY,
+    page: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum FloatY {
+    Align(f64),
+    Offset(f64),
 }
 
 #[derive(Clone, Debug)]
@@ -697,9 +852,26 @@ struct Cx<'z, 'd> {
     /// How many footnote and endnote references `note_refs` holds, for their labels.
     footnotes: usize,
     endnotes: usize,
+    /// Complex fields open at this point of the document, across paragraphs: their instruction
+    /// and whether their result is being read.
+    fields: Vec<(String, bool)>,
+    /// Hyperlinks open around the run being read.
+    in_link: usize,
+    /// While a table cell is read: its table style's paragraph and run properties.
+    cell_layer: Option<(PPr, RPr)>,
 }
 
 impl Cx<'_, '_> {
+    fn para_style(&self, id: Option<&str>) -> (PPr, RPr) {
+        self.styles.para_style(id, self.cell_layer.as_ref())
+    }
+
+    /// Inside a table of contents' (or of figures') field result, where Word prints links
+    /// without the Hyperlink style.
+    fn in_toc(&self) -> bool {
+        self.fields.iter().any(|(instr, result)| *result && instr.split_whitespace().next().is_some_and(|w| w.eq_ignore_ascii_case("TOC")))
+    }
+
     fn image(&mut self, rels: &Rels, id: &str) -> Option<ObjRef> {
         if rels.is_external(id) {
             self.notes.add("linked (not embedded) images, drawn as empty boxes");
@@ -710,11 +882,13 @@ impl Cx<'_, '_> {
             return *cached;
         }
         let loaded = match self.zip.read(&part) {
-            Ok(Some(bytes)) => crate::image_xobject(self.doc, &part, &bytes).ok().map(|(r, _)| r),
+            Ok(Some(bytes)) => {
+                crate::image_xobject(self.doc, &part, &bytes).ok().map(|(r, _)| r).or_else(|| super::emf::form(self.doc, &bytes, self.notes))
+            }
             _ => None,
         };
         if loaded.is_none() {
-            self.notes.add("images in a format the importer can't draw (EMF, WMF, SVG…), drawn as empty boxes");
+            self.notes.add("images in a format the importer can't draw (WMF, SVG…), drawn as empty boxes");
         }
         self.images.insert(part, loaded);
         loaded
@@ -722,7 +896,7 @@ impl Cx<'_, '_> {
 
     fn para_props(&mut self, ppr: Option<Node<'_, '_>>) -> (PPr, RPr, Option<(String, RunStyle)>) {
         let direct = ppr.map(PPr::parse).unwrap_or_default();
-        let (mut p, mut mark) = self.styles.para_style(direct.style.as_deref());
+        let (mut p, mut mark) = self.para_style(direct.style.as_deref());
         // Numbering's indents sit between the style's and the paragraph's own.
         let num = direct.num.clone().or_else(|| p.num.clone());
         let mut label = None;
@@ -754,10 +928,11 @@ impl Cx<'_, '_> {
             before: p.before.unwrap_or(0.0),
             after: p.after.unwrap_or(0.0),
             line: p.line.unwrap_or(LineRule::Auto(1.0)),
-            tabs: p.tabs.iter().filter(|(_, c)| !c).map(|(t, _)| *t).collect(),
+            tabs: p.tabs.iter().filter_map(|(_, t)| *t).collect(),
             base: mark.style(&self.theme),
             page_break_before: p.page_break_before.unwrap_or(false),
             shade: p.shade.flatten(),
+            borders: p.para_borders().map(Box::new),
             keep_next: p.keep_next.unwrap_or(false),
             contextual: p.contextual.unwrap_or(false).then(|| p.style.clone().or_else(|| self.styles.default_para.clone()).unwrap_or_default()),
             ..Para::default()
@@ -775,7 +950,7 @@ impl Cx<'_, '_> {
         let mut pieces: Vec<Block> = Vec::new();
         // Runs start from the paragraph style's run properties; the paragraph mark's own
         // formatting only styles the mark (and an empty paragraph's height).
-        let (_, base) = self.styles.para_style(p.style.as_deref());
+        let (_, base) = self.para_style(p.style.as_deref());
         self.inline(n, rels, &base, &mut para, &mut pieces, &mut extra, &mut state, depth);
         pieces.push(Block::Para(para));
         out.extend(pieces);
@@ -801,9 +976,12 @@ impl Cx<'_, '_> {
         for c in n.children().filter(Node::is_element) {
             match c.tag_name().name() {
                 "r" => self.run(c, rels, base, para, out, extra, state, depth),
-                "hyperlink" | "smartTag" | "ins" | "customXml" | "dir" | "bdo" | "moveTo" => {
-                    self.inline(c, rels, base, para, out, extra, state, depth + 1)
+                "hyperlink" => {
+                    self.in_link = self.in_link.saturating_add(1);
+                    self.inline(c, rels, base, para, out, extra, state, depth + 1);
+                    self.in_link = self.in_link.saturating_sub(1);
                 }
+                "smartTag" | "ins" | "customXml" | "dir" | "bdo" | "moveTo" => self.inline(c, rels, base, para, out, extra, state, depth + 1),
                 "sdt" => {
                     if let Some(content) = child(c, "sdtContent") {
                         self.inline(content, rels, base, para, out, extra, state, depth + 1);
@@ -836,7 +1014,10 @@ impl Cx<'_, '_> {
         r.style = None;
         let direct = rpr.map(RPr::parse).unwrap_or_default();
         if let Some(id) = &direct.style {
-            r.merge(&self.styles.run_style(id));
+            let plain_link = self.in_link > 0 && self.styles.hyperlink.as_ref() == Some(id) && self.in_toc();
+            if !plain_link {
+                r.merge(&self.styles.run_style(id));
+            }
         }
         r.merge(&direct);
         r.style(&self.theme)
@@ -859,8 +1040,16 @@ impl Cx<'_, '_> {
             let name = c.tag_name().name();
             match (name, &mut *state) {
                 ("fldChar", _) => match attr(c, "fldCharType") {
-                    Some("begin") => *state = FieldState::Instr(String::new()),
+                    Some("begin") => {
+                        if self.fields.len() < MAX_DEPTH {
+                            self.fields.push((String::new(), false));
+                        }
+                        *state = FieldState::Instr(String::new());
+                    }
                     Some("separate") => {
+                        if let Some((_, result)) = self.fields.last_mut() {
+                            *result = true;
+                        }
                         let field = if let FieldState::Instr(i) = &*state { page_field(i) } else { None };
                         if let Some(field) = field {
                             para.items.push(Inline::Field(field, style.clone()));
@@ -869,6 +1058,7 @@ impl Cx<'_, '_> {
                         *state = FieldState::Result(live);
                     }
                     Some("end") => {
+                        self.fields.pop();
                         // A field with no cached result: only page fields can still be shown.
                         if let FieldState::Instr(i) = &*state
                             && let Some(field) = page_field(i)
@@ -879,7 +1069,15 @@ impl Cx<'_, '_> {
                     }
                     _ => {}
                 },
-                ("instrText", FieldState::Instr(i)) if i.len() < 4096 => i.push_str(c.text().unwrap_or_default()),
+                ("instrText", FieldState::Instr(i)) if i.len() < 4096 => {
+                    let t = c.text().unwrap_or_default();
+                    i.push_str(t);
+                    if let Some((instr, false)) = self.fields.last_mut()
+                        && instr.len() < 4096
+                    {
+                        instr.push_str(t);
+                    }
+                }
                 (_, FieldState::Instr(_)) | (_, FieldState::Result(true)) => {}
                 ("t", _) => {
                     let text = self.notes.drawable(c.text().unwrap_or_default());
@@ -991,6 +1189,10 @@ impl Cx<'_, '_> {
         if let Some(b) = tpr.and_then(|p| child(p, "tblBorders")) {
             borders.merge(&Borders::parse(b));
         }
+        let (whole, parts) = self.styles.table_parts(style_id);
+        let look = Look::parse(tpr.and_then(|p| child(p, "tblLook")));
+        let band =
+            tpr.and_then(|p| child(p, "tblStyleRowBandSize")).and_then(|b| attr_f64(b, "val")).map_or(1, |v| fin(v, 1.0).clamp(1.0, 100.0) as usize);
         let cols: Vec<f64> = xml::path(t, &["tblGrid"])
             .map(|g| children(g, "gridCol").map(|c| attr_f64(c, "w").map_or(0.0, |w| twips(w).max(0.0))).collect())
             .unwrap_or_default();
@@ -999,10 +1201,16 @@ impl Cx<'_, '_> {
         let mar = tpr.and_then(|p| child(p, "tblCellMar"));
         let side = |names: [&str; 2]| mar.and_then(|m| names.iter().find_map(|n| child(m, n))).and_then(|s| attr_f64(s, "w")).map(twips);
         let pad = (side(["left", "start"]).unwrap_or(5.4), side(["right", "end"]).unwrap_or(5.4));
+        let float = tpr.and_then(|p| child(p, "tblpPr")).and_then(float_of);
+        let ncols = cols.len().max(1);
+        let row_nodes: Vec<Node<'_, '_>> = children(t, "tr").collect();
+        let nrows = row_nodes.len();
+        let saved_layer = self.cell_layer.take();
         let mut rows = Vec::new();
-        for tr in children(t, "tr") {
+        for (ri, tr) in row_nodes.into_iter().enumerate() {
             let height = xml::path(tr, &["trPr", "trHeight"]).and_then(|h| Some((twips(attr_f64(h, "val")?), attr(h, "hRule") == Some("exact"))));
             let mut cells = Vec::new();
+            let mut g = 0usize;
             for tc in tr.children().filter(|c| is(*c, "tc") || is(*c, "sdt")) {
                 let tc = if is(tc, "sdt") {
                     match xml::path(tc, &["sdtContent", "tc"]) {
@@ -1015,10 +1223,26 @@ impl Cx<'_, '_> {
                 let pr = child(tc, "tcPr");
                 let span = pr.and_then(|p| child(p, "gridSpan")).and_then(|g| attr_f64(g, "val")).map_or(1, |v| v.clamp(1.0, 64.0) as usize);
                 let vmerge = pr.and_then(|p| child(p, "vMerge")).map(|v| attr(v, "val") == Some("restart"));
-                let shade = pr.and_then(|p| child(p, "shd")).and_then(|s| attr(s, "fill")).filter(|f| *f != "auto").and_then(hex_color);
-                let cb = pr.and_then(|p| child(p, "tcBorders")).map(Borders::parse).unwrap_or_default();
+                let valign = match pr.and_then(|p| child(p, "vAlign")).and_then(|v| attr(v, "val")) {
+                    Some("center") => 0.5,
+                    Some("bottom") => 1.0,
+                    _ => 0.0,
+                };
+                // The table style's formatting for where this cell is, under the cell's own.
+                let cond = cell_cond(&whole, &parts, look, band, (ri, nrows), (g, g.saturating_add(span), ncols));
+                g = g.saturating_add(span);
+                let shade = match pr.and_then(|p| child(p, "shd")) {
+                    Some(s) => attr(s, "fill").filter(|f| *f != "auto").and_then(hex_color),
+                    None => cond.shade,
+                };
+                let mut cb = cond.borders.unwrap_or_default();
+                if let Some(own) = pr.and_then(|p| child(p, "tcBorders")) {
+                    cb.merge(&Borders::parse(own));
+                }
+                self.cell_layer = Some((cond.p, cond.r));
                 let mut blocks = Vec::new();
                 self.blocks(tc, rels, depth + 1, &mut blocks);
+                self.cell_layer = None;
                 let paras = blocks
                     .into_iter()
                     .flat_map(|b| match b {
@@ -1030,11 +1254,12 @@ impl Cx<'_, '_> {
                         Block::PageBreak => Vec::new(),
                     })
                     .collect();
-                cells.push(Cell { span, paras, shade, borders: cb, vmerge });
+                cells.push(Cell { span, paras, shade, borders: cb, vmerge, valign });
             }
             rows.push(Row { cells, height });
         }
-        Table { cols, rows, borders, indent, center, pad }
+        self.cell_layer = saved_layer;
+        Table { cols, rows, borders, indent, center, pad, float }
     }
 
     /// Read block content (a body, a cell, a header, a text box).
@@ -1067,6 +1292,7 @@ impl Cx<'_, '_> {
         let Ok(Some(text)) = self.zip.text(&part) else { return Vec::new() };
         let Ok(d) = xml::parse(&text) else { return Vec::new() };
         let Ok(hrels) = Rels::load(self.zip, &part) else { return Vec::new() };
+        self.fields.clear();
         let mut out = Vec::new();
         self.blocks(d.root_element(), &hrels, 0, &mut out);
         out
@@ -1079,6 +1305,7 @@ impl Cx<'_, '_> {
         let Ok(Some(text)) = self.zip.text(&part) else { return out };
         let Ok(d) = xml::parse(&text) else { return out };
         let Ok(nrels) = Rels::load(self.zip, &part) else { return out };
+        self.fields.clear();
         for n in children(d.root_element(), tag) {
             if let Some(id) = attr(n, "id") {
                 let mut blocks = Vec::new();
@@ -1088,6 +1315,102 @@ impl Cx<'_, '_> {
         }
         out
     }
+}
+
+/// Which parts of its table style a table shows (`w:tblLook`).
+#[derive(Clone, Copy, Debug)]
+struct Look {
+    first_row: bool,
+    last_row: bool,
+    first_col: bool,
+    last_col: bool,
+    h_band: bool,
+    v_band: bool,
+}
+
+impl Look {
+    fn parse(n: Option<Node<'_, '_>>) -> Look {
+        // Word's default look: header row, first column and banded rows.
+        let bits = n.and_then(|n| attr(n, "val")).and_then(|v| u32::from_str_radix(v, 16).ok()).unwrap_or(0x04A0);
+        let on = |name: &str, bit: u32| n.and_then(|n| attr(n, name)).map_or(bits & bit != 0, |v| flag(Some(v)));
+        Look {
+            first_row: on("firstRow", 0x20),
+            last_row: on("lastRow", 0x40),
+            first_col: on("firstColumn", 0x80),
+            last_col: on("lastColumn", 0x100),
+            h_band: !on("noHBand", 0x200),
+            v_band: !on("noVBand", 0x400),
+        }
+    }
+}
+
+/// A table style's formatting for the cell at row `ri` of `nrows` spanning grid columns
+/// `g0..g1` of `ncols`: the whole table's, then the bands', the first and last columns', the
+/// header and total rows' and the corners', each over the one before (ECMA-376 §17.7.6).
+fn cell_cond(
+    whole: &Cond,
+    parts: &[(String, Cond)],
+    look: Look,
+    band: usize,
+    (ri, nrows): (usize, usize),
+    (g0, g1, ncols): (usize, usize, usize),
+) -> Cond {
+    let mut c = whole.clone();
+    let first_row = look.first_row && ri == 0;
+    let last_row = look.last_row && nrows > 1 && ri + 1 == nrows;
+    let first_col = look.first_col && g0 == 0;
+    let last_col = look.last_col && g1 >= ncols;
+    let body_row = ri.saturating_sub(usize::from(look.first_row)) / band.max(1);
+    let body_col = g0.saturating_sub(usize::from(look.first_col));
+    let mut apply = |ty: &str| {
+        if let Some((_, p)) = parts.iter().find(|(t, _)| t == ty) {
+            c.merge(p);
+        }
+    };
+    if look.v_band && !first_col && !last_col {
+        apply(if body_col.is_multiple_of(2) { "band1Vert" } else { "band2Vert" });
+    }
+    if look.h_band && !first_row && !last_row {
+        apply(if body_row.is_multiple_of(2) { "band1Horz" } else { "band2Horz" });
+    }
+    if first_col {
+        apply("firstCol");
+    }
+    if last_col {
+        apply("lastCol");
+    }
+    if first_row {
+        apply("firstRow");
+    }
+    if last_row {
+        apply("lastRow");
+    }
+    match (first_row, last_row, first_col, last_col) {
+        (true, _, true, _) => apply("nwCell"),
+        (true, _, _, true) => apply("neCell"),
+        (_, true, true, _) => apply("swCell"),
+        (_, true, _, true) => apply("seCell"),
+        _ => {}
+    }
+    c
+}
+
+/// Where a floating table is placed, when that is against the page or its margins. A table
+/// floating in the text (`vertAnchor="text"`) stays in the flow.
+fn float_of(n: Node<'_, '_>) -> Option<Float> {
+    let page = match attr(n, "vertAnchor") {
+        Some("text") | None if attr(n, "tblpYSpec").is_none() => return None,
+        Some("text") => return None,
+        Some("page") => true,
+        _ => false,
+    };
+    let y = match attr(n, "tblpYSpec") {
+        Some("top" | "inside") => FloatY::Align(0.0),
+        Some("center") => FloatY::Align(0.5),
+        Some("bottom" | "outside") => FloatY::Align(1.0),
+        _ => FloatY::Offset(fin(attr_f64(n, "tblpY").map_or(0.0, twips), 0.0).clamp(-14_400.0, 14_400.0)),
+    };
+    Some(Float { y, page })
 }
 
 /// The text boxes in `n` that aren't inside another of its text boxes: an inner box is read with
@@ -1146,6 +1469,49 @@ struct Flow<'c> {
     section_index: usize,
     /// The previous paragraph's contextual-spacing style, and its space after (already added).
     prev_contextual: Option<(String, f64)>,
+    /// The page number and count page fields show.
+    fields: (usize, usize),
+    /// The page was started because the last one was full (not by a break): space before the
+    /// first paragraph on it is dropped, as Word does.
+    soft_top: bool,
+    /// Drawing in place on one page (a header, a footer, a floating table, a measurement):
+    /// nothing starts a new page.
+    fixed: bool,
+    /// The previous paragraph's borders and indents, when it may share a box with this one.
+    prev_borders: Option<(ParaBorders, f64, f64)>,
+}
+
+impl<'c> Flow<'c> {
+    /// A flow that draws on page `page` from PDF `y` down, without starting pages.
+    fn fixed(canvas: &'c mut Canvas, sec: Section, page: usize, y: f64, fields: (usize, usize)) -> Flow<'c> {
+        Flow {
+            canvas,
+            sec,
+            page,
+            y,
+            at_top: false,
+            page_sections: Vec::new(),
+            section_index: 0,
+            prev_contextual: None,
+            fields,
+            soft_top: false,
+            fixed: true,
+            prev_borders: None,
+        }
+    }
+}
+
+/// The height `blocks` take when laid out in `sec`'s text width, drawn on a scratch page.
+fn measure(sec: &Section, fields: (usize, usize), blocks: &[&Block]) -> f64 {
+    let mut canvas = Canvas::default();
+    let Ok(page) = canvas.new_page(sec.w, sec.h) else { return 0.0 };
+    let mut fl = Flow::fixed(&mut canvas, sec.clone(), page, sec.h, fields);
+    for (i, b) in blocks.iter().enumerate() {
+        if fl.block(b, blocks.get(i + 1).copied()).is_err() {
+            break;
+        }
+    }
+    fin(sec.h - fl.y, 0.0).max(0.0)
 }
 
 impl Flow<'_> {
@@ -1154,7 +1520,16 @@ impl Flow<'_> {
     }
 
     fn bottom(&self) -> f64 {
-        self.sec.margins[2]
+        // Content drawn in place may run past the margin rather than split.
+        if self.fixed { -1.0e7 } else { self.sec.margins[2] }
+    }
+
+    fn block(&mut self, b: &Block, next: Option<&Block>) -> Result<(), String> {
+        match b {
+            Block::Para(p) => self.para(p, next),
+            Block::Table(t) => self.table(t),
+            Block::PageBreak => self.new_page(),
+        }
     }
 
     fn x0(&self) -> f64 {
@@ -1165,12 +1540,78 @@ impl Flow<'_> {
         (self.sec.w - self.sec.margins[1] - self.sec.margins[3]).max(36.0)
     }
 
+    /// Start a page at a break (page, section, page break before).
     fn new_page(&mut self) -> Result<(), String> {
+        self.soft_top = false;
+        self.prev_borders = None;
+        if self.fixed {
+            // Carry on where we are; the next item is placed even if it doesn't fit.
+            self.at_top = true;
+            return Ok(());
+        }
         self.page = self.canvas.new_page(self.sec.w, self.sec.h)?;
         self.page_sections.push(self.section_index);
         self.y = self.top();
         self.at_top = true;
         Ok(())
+    }
+
+    /// Start a page because this one is full.
+    fn overflow(&mut self) -> Result<(), String> {
+        self.new_page()?;
+        self.soft_top = true;
+        Ok(())
+    }
+
+    /// The left and right edges of a paragraph's box: its indents, pushed out by its borders.
+    fn box_x(&self, laid: &Laid, b: Option<ParaBorders>) -> (f64, f64) {
+        let out = |r: Option<Rule>| r.map_or(0.0, |r| r.space + r.width);
+        let x0 = self.x0();
+        (x0 + laid.left - out(b.and_then(|b| b.left)), x0 + laid.right + out(b.and_then(|b| b.right)))
+    }
+
+    /// A band `h` tall of a paragraph's box from the current y: its shading and side borders.
+    fn band(&mut self, laid: &Laid, b: Option<ParaBorders>, h: f64) {
+        if h <= 0.0 {
+            return;
+        }
+        let (x1, x2) = self.box_x(laid, b);
+        let y = self.y;
+        let Some(page) = self.canvas.page(self.page) else { return };
+        if let Some(c) = laid.shade {
+            page.fill_rect(x1, y - h, x2 - x1, h, c);
+        }
+        for (r, x) in [(b.and_then(|b| b.left), x1), (b.and_then(|b| b.right), x2)] {
+            let Some(r) = r else { continue };
+            let x = if x == x1 { x + r.width / 2.0 } else { x - r.width / 2.0 };
+            if r.double {
+                // Two lines with a gap as wide as each between them.
+                let w = r.width / 3.0;
+                page.line(x - w, y, x - w, y - h, w, r.color);
+                page.line(x + w, y, x + w, y - h, w, r.color);
+            } else {
+                page.line(x, y, x, y - h, r.width, r.color);
+            }
+        }
+    }
+
+    /// A horizontal border of a paragraph's box, taking `r.space + r.width` of height: above
+    /// the text (`top`) the rule comes first, below it the space does.
+    fn rule(&mut self, laid: &Laid, b: Option<ParaBorders>, r: Rule, top: bool) {
+        let h = r.space + r.width;
+        let r = if r.double { Rule { width: r.width / 3.0, ..r } } else { r };
+        self.band(laid, b, h);
+        let (x1, x2) = self.box_x(laid, b);
+        let y = if top { self.y - r.width / 2.0 } else { self.y - r.space - r.width / 2.0 };
+        if let Some(page) = self.canvas.page(self.page) {
+            if r.double {
+                page.line(x1, y + r.width, x2, y + r.width, r.width, r.color);
+                page.line(x1, y - r.width, x2, y - r.width, r.width, r.color);
+            } else {
+                page.line(x1, y, x2, y, r.width, r.color);
+            }
+        }
+        self.y -= h;
     }
 
     fn page_mut(&mut self) -> Option<&mut Page> {
@@ -1181,7 +1622,7 @@ impl Flow<'_> {
     fn first_line(&self, b: Option<&Block>) -> f64 {
         match b {
             Some(Block::Para(p)) => {
-                let l = flow::layout(p, self.width(), (1, 1));
+                let l = flow::layout(p, self.width(), self.fields);
                 l.before + l.lines.first().map_or(0.0, |l| l.height)
             }
             Some(Block::Table(_)) => 20.0,
@@ -1190,7 +1631,7 @@ impl Flow<'_> {
     }
 
     fn para(&mut self, p: &Para, next: Option<&Block>) -> Result<(), String> {
-        let laid = flow::layout(p, self.width(), (1, 1));
+        let laid = flow::layout(p, self.width(), self.fields);
         if laid.page_break_before && !self.at_top {
             self.new_page()?;
         }
@@ -1207,40 +1648,83 @@ impl Flow<'_> {
             before = 0.0;
         }
         self.prev_contextual = None;
+        // Consecutive paragraphs with the same borders and indents share one box.
+        let bd = p.borders.as_deref().copied();
+        let grouped_prev = bd.is_some() && self.prev_borders == bd.map(|b| (b, laid.left, laid.right));
+        let grouped_next =
+            bd.is_some() && matches!(next, Some(Block::Para(n)) if n.borders.as_deref().copied() == bd && n.left == p.left && n.right == p.right);
+        let top_rule = bd.and_then(|b| if grouped_prev { b.between } else { b.top });
+        let bottom_rule = bd.and_then(|b| b.bottom).filter(|_| !grouped_next);
+        let rules = top_rule.map_or(0.0, |r| r.space + r.width) + bottom_rule.map_or(0.0, |r| r.space + r.width);
         // Keep with next: move to a new page rather than strand this paragraph at the bottom.
         if p.keep_next && !self.at_top {
-            let need = before + laid.lines.iter().map(|l| l.height).sum::<f64>() + laid.after + self.first_line(next);
+            let need = before + rules + laid.lines.iter().map(|l| l.height).sum::<f64>() + laid.after + self.first_line(next);
             if self.y - need < self.bottom() && need <= self.top() - self.bottom() {
-                self.new_page()?;
+                self.overflow()?;
             }
         }
-        if !self.at_top {
+        // Space before is kept at the top of a page that a break started, as Word does.
+        if !self.at_top || !self.soft_top {
+            if grouped_prev && !self.at_top {
+                self.band(&laid, bd, before);
+            }
             self.y -= before;
+        }
+        if let Some(r) = top_rule {
+            let first = laid.lines.first().map_or(0.0, |l| l.height);
+            if self.y - r.space - r.width - first < self.bottom() - 0.5 && !self.at_top {
+                self.overflow()?;
+            }
+            self.rule(&laid, bd, r, true);
         }
         let x0 = self.x0();
         for line in &laid.lines {
             if self.y - line.height < self.bottom() - 0.5 && !self.at_top {
-                self.new_page()?;
+                self.overflow()?;
             }
+            self.band(&laid, bd, line.height);
             let y = self.y;
-            if let Some(c) = laid.shade
-                && let Some(page) = self.page_mut()
-            {
-                page.fill_rect(x0 + laid.left, y - line.height, laid.right - laid.left, line.height, c);
-            }
             if let Some(page) = self.page_mut() {
                 flow::draw_line(page, &laid, line, x0, y);
             }
             self.y -= line.height;
             self.at_top = false;
         }
+        if let Some(r) = bottom_rule {
+            self.rule(&laid, bd, r, false);
+        }
+        if grouped_next {
+            self.band(&laid, bd, laid.after);
+        }
         self.y -= laid.after;
         self.prev_contextual = p.contextual.clone().map(|s| (s, laid.after));
+        self.prev_borders = bd.map(|b| (b, laid.left, laid.right));
         Ok(())
     }
 
     fn table(&mut self, t: &Table) -> Result<(), String> {
         self.prev_contextual = None;
+        self.prev_borders = None;
+        // A table floating against the page or its margins is drawn there, and the text goes on
+        // where it was.
+        if let Some(f) = t.float
+            && !self.fixed
+        {
+            let h = measure(&self.sec, self.fields, &[&Block::Table(Table { float: None, ..t.clone() })]);
+            let (top, bottom) = if f.page { (self.sec.h, 0.0) } else { (self.top(), self.sec.margins[2]) };
+            let y_top = match f.y {
+                FloatY::Align(k) => top - (top - bottom - h).max(0.0) * k,
+                FloatY::Offset(o) => top - o,
+            };
+            let saved = (self.y, self.at_top, self.soft_top);
+            self.fixed = true;
+            self.y = y_top;
+            self.at_top = false;
+            let drawn = self.table(t);
+            self.fixed = false;
+            (self.y, self.at_top, self.soft_top) = saved;
+            return drawn;
+        }
         let area = self.width();
         let ncols = t.cols.len().max(t.rows.iter().map(|r| r.cells.iter().map(|c| c.span).sum::<usize>()).max().unwrap_or(1)).max(1);
         let mut cols = t.cols.clone();
@@ -1286,7 +1770,7 @@ impl Flow<'_> {
                 let x2 = edges.get(g.saturating_add(cell.span).min(ncols)).copied().unwrap_or(table_w);
                 let inner = (x2 - x1 - t.pad.0 - t.pad.1).max(4.0);
                 let laids: Vec<Laid> =
-                    if cell.vmerge == Some(false) { Vec::new() } else { cell.paras.iter().map(|p| flow::layout(p, inner, (1, 1))).collect() };
+                    if cell.vmerge == Some(false) { Vec::new() } else { cell.paras.iter().map(|p| flow::layout(p, inner, self.fields)).collect() };
                 let mut items = Vec::new();
                 for (pi, l) in laids.iter().enumerate() {
                     let same = |a: usize, b: usize| matches!((cell.paras.get(a).and_then(|p| p.contextual.as_ref()), cell.paras.get(b).and_then(|p| p.contextual.as_ref())), (Some(x), Some(y)) if x == y);
@@ -1310,7 +1794,7 @@ impl Flow<'_> {
             }
             let full = self.top() - self.bottom();
             if self.y - row_h < self.bottom() && !self.at_top && row_h <= full {
-                self.new_page()?;
+                self.overflow()?;
             }
             // Draw the row, continuing it on new pages while it doesn't fit.
             let mut cursors = vec![0usize; cells.len()];
@@ -1351,6 +1835,10 @@ impl Flow<'_> {
                     let Some((laids, items)) = cells.get(ci) else { continue };
                     let Some(cursor) = cursors.get_mut(ci) else { continue };
                     let mut y = y_top - 1.0;
+                    // A cell whose row fits here is aligned in it (top, centre or bottom).
+                    if first_part && part_h >= remaining_h - 0.01 && cell.valign > 0.0 {
+                        y -= (part_h - content(items)).max(0.0) * cell.valign;
+                    }
                     let mut placed = 0usize;
                     while let Some((h, what)) = items.get(*cursor) {
                         let fits = y - h >= y_top - part_h - 0.01;
@@ -1408,7 +1896,7 @@ impl Flow<'_> {
                 if done || part_h >= remaining_h {
                     break;
                 }
-                self.new_page()?;
+                self.overflow()?;
                 first_part = false;
             }
         }
@@ -1425,7 +1913,21 @@ pub(crate) fn convert(zip: &Zip<'_>, main: &str, doc: &mut Document, notes: &mut
     let theme = load_theme(zip, &rels);
     let styles = load_styles(zip, &rels)?;
     let numbering = load_numbering(zip, &rels)?;
-    let mut cx = Cx { zip, doc, notes, styles, numbering, theme, images: HashMap::new(), note_refs: Vec::new(), footnotes: 0, endnotes: 0 };
+    let mut cx = Cx {
+        zip,
+        doc,
+        notes,
+        styles,
+        numbering,
+        theme,
+        images: HashMap::new(),
+        note_refs: Vec::new(),
+        footnotes: 0,
+        endnotes: 0,
+        fields: Vec::new(),
+        in_link: 0,
+        cell_layer: None,
+    };
 
     // Split the body into sections: a paragraph carrying a sectPr ends one.
     let final_sect = child(body, "sectPr");
@@ -1500,8 +2002,20 @@ pub(crate) fn convert(zip: &Zip<'_>, main: &str, doc: &mut Document, notes: &mut
     // Lay the body out.
     let mut canvas = Canvas::default();
     let first = sections.first().map(|(s, _)| s.clone()).unwrap_or_default();
-    let mut fl =
-        Flow { canvas: &mut canvas, sec: first, page: 0, y: 0.0, at_top: true, page_sections: Vec::new(), section_index: 0, prev_contextual: None };
+    let mut fl = Flow {
+        canvas: &mut canvas,
+        sec: first,
+        page: 0,
+        y: 0.0,
+        at_top: true,
+        page_sections: Vec::new(),
+        section_index: 0,
+        prev_contextual: None,
+        fields: (1, 1),
+        soft_top: false,
+        fixed: false,
+        prev_borders: None,
+    };
     fl.new_page()?;
     for (si, (sec, blocks)) in sections.iter().enumerate() {
         if si > 0 {
@@ -1522,11 +2036,15 @@ pub(crate) fn convert(zip: &Zip<'_>, main: &str, doc: &mut Document, notes: &mut
             }
         }
         for (bi, b) in blocks.iter().enumerate() {
-            match b {
-                Block::Para(p) => fl.para(p, blocks.get(bi + 1))?,
-                Block::Table(t) => fl.table(t)?,
-                Block::PageBreak => fl.new_page()?,
+            // A manual page break at the end of a paragraph leaves its empty remainder on the
+            // new page; when a "page break before" paragraph follows, Word starts one page, not
+            // two, so the remainder is left out.
+            let after_break = bi.checked_sub(1).and_then(|i| blocks.get(i)).is_some_and(|p| matches!(p, Block::PageBreak));
+            let breaks_next = matches!(blocks.get(bi + 1), Some(Block::Para(n)) if n.page_break_before);
+            if after_break && breaks_next && matches!(b, Block::Para(p) if p.items.is_empty() && p.label.is_none()) {
+                continue;
             }
+            fl.block(b, blocks.get(bi + 1))?;
         }
     }
     let page_sections = std::mem::take(&mut fl.page_sections);
@@ -1562,29 +2080,15 @@ pub(crate) fn convert(zip: &Zip<'_>, main: &str, doc: &mut Document, notes: &mut
                 cache.insert(id.clone(), blocks);
             }
             let Some(blocks) = cache.get(&id) else { continue };
-            let width = (sec.w - sec.margins[1] - sec.margins[3]).max(36.0);
-            let laids: Vec<Laid> = blocks
-                .iter()
-                .filter_map(|b| match b {
-                    Block::Para(p) => Some(flow::layout(p, width, (pi + 1, total))),
-                    Block::Table(t) => {
-                        let text: Vec<Inline> = t
-                            .rows
-                            .iter()
-                            .flat_map(|r| {
-                                r.cells.iter().flat_map(|c| c.paras.iter().flat_map(|p| p.items.clone()).chain(std::iter::once(Inline::Tab)))
-                            })
-                            .collect();
-                        Some(flow::layout(&Para { items: text, ..Para::default() }, width, (pi + 1, total)))
-                    }
-                    Block::PageBreak => None,
-                })
-                .collect();
-            let height: f64 = laids.iter().map(Laid::height).sum();
-            let Some(page) = canvas.page(pi) else { continue };
-            let mut y = if footer { sec.footer_dist + height } else { sec.h - sec.header_dist };
-            for l in &laids {
-                y -= flow::draw(page, l, sec.margins[3], y);
+            // Headers and footers are laid out like the body (tables as tables), in place: a
+            // header from its distance below the page's top, a footer up to its distance above
+            // the bottom.
+            let refs: Vec<&Block> = blocks.iter().filter(|b| !matches!(b, Block::PageBreak)).collect();
+            let fields = (pi + 1, total);
+            let start = if footer { sec.footer_dist + measure(sec, fields, &refs) } else { sec.h - sec.header_dist };
+            let mut fl = Flow::fixed(&mut canvas, sec.clone(), pi, start, fields);
+            for (i, b) in refs.iter().enumerate() {
+                fl.block(b, refs.get(i + 1).copied())?;
             }
         }
     }

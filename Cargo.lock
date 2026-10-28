@@ -4344,6 +4344,7 @@ dependencies = [
  "roxmltree 0.20.0",
  "thiserror 2.0.21",
  "tiff",
+ "web-time",
  "zune-jpeg",
 ]
 
