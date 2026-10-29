@@ -73,7 +73,7 @@ pub(crate) struct Value<'a> {
 }
 
 /// Whether a rule matches a cell's value.
-type Matcher = Box<dyn Fn(&Value<'_>) -> bool>;
+type Matcher<'a> = Box<dyn Fn(&(u32, u32), &Value<'_>) -> bool + 'a>;
 
 /// A sheet's cells by (row, column), as the rules see them.
 pub(crate) type Cells<'a> = BTreeMap<(u32, u32), Value<'a>>;
@@ -273,12 +273,12 @@ pub(crate) fn evaluate(
         let text_arg = |i: usize| formulas.get(i).map(|f| f.trim_matches('"').to_lowercase());
         let ty = attr(rule, "type").unwrap_or_default();
         // Which targets the rule matches, for the rules that apply a dxf.
-        let matcher: Option<Matcher> = match ty {
+        let matcher: Option<Matcher<'_>> = match ty {
             "cellIs" => {
                 let op = attr(rule, "operator").unwrap_or("equal").to_owned();
                 let (a, b) = (num(0), num(1));
                 let (ta, _) = (text_arg(0), text_arg(1));
-                Some(Box::new(move |v: &Value<'_>| match (v.number, a) {
+                Some(Box::new(move |_: &(u32, u32), v: &Value<'_>| match (v.number, a) {
                     (Some(x), Some(a)) => match op.as_str() {
                         "lessThan" => x < a,
                         "lessThanOrEqual" => x <= a,
@@ -313,7 +313,7 @@ pub(crate) fn evaluate(
                     numbers.len().checked_sub(count).and_then(|i| numbers.get(i)).copied()
                 };
                 let cut = cut.or(if bottom { numbers.last() } else { numbers.first() }.copied());
-                Some(Box::new(move |v: &Value<'_>| match (v.number, cut) {
+                Some(Box::new(move |_: &(u32, u32), v: &Value<'_>| match (v.number, cut) {
                     (Some(x), Some(c)) => {
                         if bottom {
                             x <= c
@@ -328,7 +328,7 @@ pub(crate) fn evaluate(
                 let mean = if numbers.is_empty() { 0.0 } else { numbers.iter().sum::<f64>() / numbers.len() as f64 };
                 let above = attr(rule, "aboveAverage").is_none_or(|v| flag(Some(v)));
                 let equal = flag(attr(rule, "equalAverage")) && attr(rule, "equalAverage").is_some();
-                Some(Box::new(move |v: &Value<'_>| {
+                Some(Box::new(move |_: &(u32, u32), v: &Value<'_>| {
                     v.number.is_some_and(|x| if above { x > mean || (equal && x == mean) } else { x < mean || (equal && x == mean) })
                 }))
             }
@@ -338,12 +338,12 @@ pub(crate) fn evaluate(
                     *counts.entry(v.text.to_lowercase()).or_default() += 1;
                 }
                 let dup = ty == "duplicateValues";
-                Some(Box::new(move |v: &Value<'_>| counts.get(&v.text.to_lowercase()).is_some_and(|n| (*n > 1) == dup)))
+                Some(Box::new(move |_: &(u32, u32), v: &Value<'_>| counts.get(&v.text.to_lowercase()).is_some_and(|n| (*n > 1) == dup)))
             }
             "containsText" | "notContainsText" | "beginsWith" | "endsWith" => {
                 let t = attr(rule, "text").unwrap_or_default().to_lowercase();
                 let ty = ty.to_owned();
-                Some(Box::new(move |v: &Value<'_>| {
+                Some(Box::new(move |_: &(u32, u32), v: &Value<'_>| {
                     let s = v.text.to_lowercase();
                     match ty.as_str() {
                         "containsText" => s.contains(&t),
@@ -353,17 +353,29 @@ pub(crate) fn evaluate(
                     }
                 }))
             }
-            "containsBlanks" => Some(Box::new(|v: &Value<'_>| v.text.trim().is_empty())),
-            "notContainsBlanks" => Some(Box::new(|v: &Value<'_>| !v.text.trim().is_empty())),
-            "containsErrors" => Some(Box::new(|v: &Value<'_>| v.text.starts_with('#'))),
-            "notContainsErrors" => Some(Box::new(|v: &Value<'_>| !v.text.starts_with('#'))),
+            "containsBlanks" => Some(Box::new(|_: &(u32, u32), v: &Value<'_>| v.text.trim().is_empty())),
+            "notContainsBlanks" => Some(Box::new(|_: &(u32, u32), v: &Value<'_>| !v.text.trim().is_empty())),
+            "containsErrors" => Some(Box::new(|_: &(u32, u32), v: &Value<'_>| v.text.starts_with('#'))),
+            "notContainsErrors" => Some(Box::new(|_: &(u32, u32), v: &Value<'_>| !v.text.starts_with('#'))),
             "timePeriod" => {
                 let p = attr(rule, "timePeriod").unwrap_or_default().to_owned();
-                Some(Box::new(move |v: &Value<'_>| v.number.is_some_and(|x| in_period(x, &p, today))))
+                Some(Box::new(move |_: &(u32, u32), v: &Value<'_>| v.number.is_some_and(|x| in_period(x, &p, today))))
             }
             "colorScale" | "dataBar" | "iconSet" => None,
+            "expression" => {
+                // Written for the top-left cell of the rule's first range; relative references
+                // move with each cell tested.
+                let origin = sqref.split_whitespace().next().and_then(|r| super::xlsx::col_index(r.split(':').next().unwrap_or(r))).unwrap_or((1, 1));
+                match formulas.first().and_then(|f| super::xlsx_formula::parse(f, origin)) {
+                    Some(f) => Some(Box::new(move |at: &(u32, u32), _: &Value<'_>| f.eval(cells, *at, today).truthy())),
+                    None => {
+                        notes.add("conditional formatting rules with formulas the importer can't evaluate, left out");
+                        continue;
+                    }
+                }
+            }
             _ => {
-                notes.add("conditional formatting rules that need a formula, left out");
+                notes.add("conditional formatting rules of an unknown type, left out");
                 continue;
             }
         };
@@ -374,7 +386,7 @@ pub(crate) fn evaluate(
             }
             let matched = match &matcher {
                 Some(m) => {
-                    if !m(v) {
+                    if !m(key, v) {
                         continue;
                     }
                     if let Some(d) = dxf {

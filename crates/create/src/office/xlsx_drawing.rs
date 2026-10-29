@@ -55,11 +55,23 @@ pub(crate) struct Shape {
     anchor: f64,
 }
 
+impl Shape {
+    /// A preset shape with a fill and an outline (width, colour) and no text of its own.
+    pub(crate) fn plain(prst: &str, fill: Option<[f64; 3]>, line: Option<(f64, [f64; 3])>) -> Shape {
+        Shape { prst: prst.to_owned(), fill, line, head: false, flip_h: false, flip_v: false, paras: Vec::new(), anchor: 0.0 }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum What {
+    /// A group's objects, each in its box as fractions of the group's (left, top, width, height).
+    Group(Vec<([f64; 4], What)>),
     Image(Option<ObjRef>),
     Shape(Shape),
-    Chart,
+    /// A chart, or `None` for one that can't be read (an outlined box).
+    Chart(Option<Box<super::chart::Chart>>),
+    /// A SmartArt diagram's shapes, placed by their fraction of its frame.
+    Diagram(Vec<([f64; 4], Shape)>),
 }
 
 #[derive(Clone, Debug)]
@@ -149,7 +161,7 @@ fn fill_of(n: Option<Node<'_, '_>>, theme: &[[f64; 3]]) -> Option<Option<[f64; 3
     Some(f.children().find(Node::is_element).and_then(|c| color(c, theme)))
 }
 
-fn shape(sp: Node<'_, '_>, theme: &[[f64; 3]], notes: &mut Notes) -> Shape {
+pub(crate) fn shape(sp: Node<'_, '_>, theme: &[[f64; 3]], notes: &mut Notes) -> Shape {
     let sppr = child(sp, "spPr");
     let style = child(sp, "style");
     let style_color = |k: &str| style.and_then(|s| child(s, k)).and_then(|r| r.children().find(Node::is_element)).and_then(|c| color(c, theme));
@@ -209,6 +221,43 @@ fn shape(sp: Node<'_, '_>, theme: &[[f64; 3]], notes: &mut Notes) -> Shape {
     }
 }
 
+/// The shapes of a SmartArt diagram, from the drawing Office saves with it (found through the
+/// data part's `dataModelExt`, in `rels`, the relationships of the part holding the diagram).
+/// Each shape is placed by its fraction of the diagram's frame, `size` EMU big. `None` when the
+/// diagram has no saved drawing.
+pub(crate) fn diagram(
+    zip: &Zip<'_>,
+    rels: &Rels,
+    data: Node<'_, '_>,
+    size: (f64, f64),
+    theme: &[[f64; 3]],
+    notes: &mut Notes,
+) -> Option<Vec<([f64; 4], Shape)>> {
+    let ids = data.descendants().find(|n| is(*n, "relIds"))?;
+    let dm = rels.target(rel_attr(ids, "dm")?)?.to_owned();
+    let model = zip.text(&dm).ok()??;
+    let model = xml::parse(&model).ok()?;
+    let drawing_id = model.descendants().find(|n| is(*n, "dataModelExt")).and_then(|e| attr(e, "relId"))?;
+    let part = rels.target(drawing_id)?.to_owned();
+    let text = zip.text(&part).ok()??;
+    let d = xml::parse(&text).ok()?;
+    let tree = d.descendants().find(|n| is(*n, "spTree"))?;
+    let mut raw = Vec::new();
+    for sp in tree.descendants().filter(|n| is(*n, "sp")).take(MAX_OBJECTS) {
+        let Some(x) = xml::path(sp, &["spPr", "xfrm"]) else { continue };
+        let v = |name: &str, k: &str| child(x, name).and_then(|e| attr_f64(e, k)).filter(|v| v.is_finite()).unwrap_or(0.0);
+        raw.push(([v("off", "x"), v("off", "y"), v("ext", "cx"), v("ext", "cy")], shape(sp, theme, notes)));
+    }
+    // Without the frame's size, the shapes' own extent stands for it.
+    let (cx, cy) = if size.0 > 1.0 && size.1 > 1.0 {
+        size
+    } else {
+        raw.iter().fold((1.0f64, 1.0f64), |(w, h), (r, _)| (w.max(r[0] + r[2]), h.max(r[1] + r[3])))
+    };
+    let out: Vec<([f64; 4], Shape)> = raw.into_iter().map(|(r, s)| ([r[0] / cx, r[1] / cy, r[2] / cx, r[3] / cy], s)).collect();
+    (!out.is_empty()).then_some(out)
+}
+
 /// The objects of drawing part `part`, with their pictures added to `doc`.
 pub(crate) fn read(zip: &Zip<'_>, part: &str, doc: &mut Document, theme: &[[f64; 3]], notes: &mut Notes) -> Vec<Drawn> {
     let mut out = Vec::new();
@@ -233,42 +282,110 @@ pub(crate) fn read(zip: &Zip<'_>, part: &str, doc: &mut Document, theme: &[[f64;
             _ => continue,
         };
         let Some(obj) = a.children().find(|c| matches!(c.tag_name().name(), "pic" | "sp" | "cxnSp" | "graphicFrame" | "grpSp")) else { continue };
-        let what = match obj.tag_name().name() {
-            "pic" => {
-                let id = obj.descendants().find(|n| is(*n, "blip")).and_then(|b| rel_attr(b, "embed"));
-                let target = id.and_then(|id| rels.as_ref()?.target(id)).map(str::to_owned);
-                let img = target.and_then(|t| {
-                    let bytes = zip.read(&t).ok()??;
-                    crate::image_xobject(doc, &t, &bytes).ok().map(|(r, _)| r).or_else(|| super::emf::form(doc, &bytes, notes))
-                });
-                if img.is_none() {
-                    notes.add("sheet pictures in a format the importer can't draw, drawn as empty boxes");
-                }
-                What::Image(img)
-            }
-            "sp" | "cxnSp" => What::Shape(shape(obj, theme, notes)),
-            "graphicFrame" => {
-                notes.add("charts on sheets, drawn as empty boxes");
-                What::Chart
-            }
-            _ => {
-                notes.add("grouped shapes on sheets, left out");
-                continue;
-            }
-        };
+        let Some(what) = object(obj, zip, rels.as_ref(), doc, theme, notes, 0) else { continue };
         out.push(Drawn { anchor, what });
     }
     out
 }
 
+/// What one drawing object (a picture, shape, connector, chart, SmartArt or group) shows.
+fn object(
+    obj: Node<'_, '_>,
+    zip: &Zip<'_>,
+    rels: Option<&Rels>,
+    doc: &mut Document,
+    theme: &[[f64; 3]],
+    notes: &mut Notes,
+    depth: usize,
+) -> Option<What> {
+    Some(match obj.tag_name().name() {
+        "pic" => {
+            let id = obj.descendants().find(|n| is(*n, "blip")).and_then(|b| rel_attr(b, "embed"));
+            let target = id.and_then(|id| rels.as_ref()?.target(id)).map(str::to_owned);
+            let img = target.and_then(|t| {
+                let bytes = zip.read(&t).ok()??;
+                crate::image_xobject(doc, &t, &bytes).ok().map(|(r, _)| r).or_else(|| super::emf::form(doc, &bytes, notes))
+            });
+            if img.is_none() {
+                notes.add("sheet pictures in a format the importer can't draw, drawn as empty boxes");
+            }
+            What::Image(img)
+        }
+        "sp" | "cxnSp" => What::Shape(shape(obj, theme, notes)),
+        "graphicFrame" if obj.descendants().any(|n| is(n, "relIds")) => {
+            let size = obj
+                .children()
+                .find(|c| is(*c, "xfrm"))
+                .and_then(|x| child(x, "ext"))
+                .map_or((0.0, 0.0), |e| (attr_f64(e, "cx").unwrap_or(0.0), attr_f64(e, "cy").unwrap_or(0.0)));
+            match rels.as_ref().and_then(|r| diagram(zip, r, obj, size, theme, notes)) {
+                Some(shapes) => What::Diagram(shapes),
+                None => {
+                    notes.add("SmartArt diagrams without a saved drawing, drawn as empty boxes");
+                    What::Image(None)
+                }
+            }
+        }
+        "graphicFrame" => {
+            let target = obj
+                .descendants()
+                .find(|n| is(*n, "chart"))
+                .and_then(|c| rel_attr(c, "id"))
+                .and_then(|id| rels.as_ref()?.target(id))
+                .map(str::to_owned);
+            let chart = target.and_then(|t| super::chart::read(zip, &t, theme.get(4..10).unwrap_or_default(), notes));
+            if chart.is_none() {
+                notes.add("charts on sheets that can't be read, drawn as empty boxes");
+            }
+            What::Chart(chart.map(Box::new))
+        }
+        "grpSp" => {
+            // A group places its children's coordinates (`chOff`, `chExt`) in its own box.
+            let x = child(obj, "grpSpPr").and_then(|p| child(p, "xfrm"));
+            let v = |name: &str, k: &str| x.and_then(|x| child(x, name)).and_then(|e| attr_f64(e, k)).filter(|v| v.is_finite());
+            let (ox, oy) = (v("chOff", "x").unwrap_or(0.0), v("chOff", "y").unwrap_or(0.0));
+            let (cw, ch) = (v("chExt", "cx").unwrap_or(1.0).max(1.0), v("chExt", "cy").unwrap_or(1.0).max(1.0));
+            let mut parts = Vec::new();
+            for c in obj.children().filter(|c| matches!(c.tag_name().name(), "pic" | "sp" | "cxnSp" | "graphicFrame" | "grpSp")).take(MAX_OBJECTS) {
+                let xf = if is(c, "grpSp") { child(c, "grpSpPr") } else { c.descendants().find(|n| is(*n, "spPr") || is(*n, "xfrm")) }
+                    .and_then(|p| if is(p, "xfrm") { Some(p) } else { child(p, "xfrm") });
+                let g = |name: &str, k: &str| xf.and_then(|x| child(x, name)).and_then(|e| attr_f64(e, k)).filter(|v| v.is_finite()).unwrap_or(0.0);
+                let rect = [(g("off", "x") - ox) / cw, (g("off", "y") - oy) / ch, g("ext", "cx") / cw, g("ext", "cy") / ch];
+                if depth < 8
+                    && let Some(w) = object(c, zip, rels, doc, theme, notes, depth + 1)
+                {
+                    parts.push((rect, w));
+                }
+            }
+            What::Group(parts)
+        }
+        _ => return None,
+    })
+}
+
 /// Draw an object into the rectangle `(x, y)` (bottom left, PDF coordinates) `w × h`.
 pub(crate) fn draw(page: &mut Page, d: &Drawn, x: f64, y: f64, w: f64, h: f64) {
+    draw_what(page, &d.what, x, y, w, h);
+}
+
+fn draw_what(page: &mut Page, what: &What, x: f64, y: f64, w: f64, h: f64) {
     if !(w.is_finite() && h.is_finite()) || w < 0.0 || h < 0.0 {
         return;
     }
-    match &d.what {
+    match what {
+        What::Group(parts) => {
+            for ([fx, fy, fw, fh], part) in parts {
+                draw_what(page, part, x + fx * w, y + h - (fy + fh) * h, fw * w, fh * h);
+            }
+        }
         What::Image(Some(r)) => page.image(*r, x, y, w, h),
-        What::Image(None) | What::Chart => page.placeholder(x, y, w, h),
+        What::Image(None) | What::Chart(None) => page.placeholder(x, y, w, h),
+        What::Chart(Some(c)) => super::chart::draw(page, c, x, y, w, h),
+        What::Diagram(shapes) => {
+            for ([fx, fy, fw, fh], s) in shapes {
+                draw_shape(page, s, x + fx * w, y + h - (fy + fh) * h, fw * w, fh * h);
+            }
+        }
         What::Shape(s) => draw_shape(page, s, x, y, w, h),
     }
 }
@@ -276,7 +393,8 @@ pub(crate) fn draw(page: &mut Page, d: &Drawn, x: f64, y: f64, w: f64, h: f64) {
 /// A line of shape text: its runs, alignment and height.
 type TextLine = (Vec<(String, RunStyle)>, f64, f64);
 
-fn draw_shape(page: &mut Page, s: &Shape, x: f64, y: f64, w: f64, h: f64) {
+/// Draw a shape's outline and fill (not its text) into `(x, y)` (bottom left) `w × h`.
+pub(crate) fn draw_geometry(page: &mut Page, s: &Shape, x: f64, y: f64, w: f64, h: f64) {
     let (x2, y2) = (x + w, y + h);
     let pts = |p: &[(f64, f64)]| -> String {
         let mut o = String::new();
@@ -413,6 +531,15 @@ fn draw_shape(page: &mut Page, s: &Shape, x: f64, y: f64, w: f64, h: f64) {
     ops.push_str(op);
     ops.push_str(" Q\n");
     page.raw(&ops);
+}
+
+/// Draw a shape with its own (DrawingML) text into `(x, y)` (bottom left) `w × h`.
+pub(crate) fn draw_shape(page: &mut Page, s: &Shape, x: f64, y: f64, w: f64, h: f64) {
+    draw_geometry(page, s, x, y, w, h);
+    if matches!(s.prst.as_str(), "line" | "straightConnector1") {
+        return;
+    }
+    let y2 = y + h;
     // Text, wrapped inside the default insets (0.1 in left and right, 0.05 in top and bottom).
     let inner = (w - 14.4).max(4.0);
     let mut lines: Vec<TextLine> = Vec::new();

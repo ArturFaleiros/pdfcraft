@@ -9,8 +9,9 @@
 //! cached results.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 
-use chrono::Datelike;
+use chrono::{Datelike, Timelike};
 use pdfcraft_cos::Document;
 use roxmltree::Node;
 
@@ -21,7 +22,7 @@ use super::xlsx_drawing::{self as drawing, Anchor, Drawn};
 use super::xlsx_hf::{self as hf, HeaderFooter, Pictures};
 use super::xml::{self, Rels, attr, attr_f64, child, children, flag, is, rel_attr};
 use super::zip::Zip;
-use super::{Notes, RunStyle, family_of, hex_color};
+use super::{LinkTarget, Notes, RunStyle, family_of, hex_color};
 
 /// Most cells read from one sheet.
 const MAX_CELLS: usize = 2_000_000;
@@ -57,6 +58,10 @@ struct Font {
 struct Edge {
     width: f64,
     color: [f64; 3],
+    /// The dash pattern of dotted and dashed styles (`[on off …]` in points).
+    dash: Option<&'static str>,
+    /// Two thin lines.
+    double: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -65,6 +70,8 @@ struct Edges {
     right: Option<Edge>,
     top: Option<Edge>,
     bottom: Option<Edge>,
+    /// A diagonal line, rising (`diagonalUp`) and or falling (`diagonalDown`).
+    diagonal: Option<(Edge, bool, bool)>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -77,6 +84,10 @@ struct Xf {
     v_align: Option<String>,
     wrap: bool,
     indent: f64,
+    /// `textRotation`: 1–90 degrees counter-clockwise, 91–180 clockwise (less 90), 255 stacked.
+    rotation: u16,
+    /// Shrink to fit: text too wide for its cell is set smaller.
+    shrink: bool,
 }
 
 #[derive(Default)]
@@ -88,6 +99,9 @@ struct Styles {
     formats: HashMap<u32, String>,
     /// Conditional formatting's differential formats.
     dxfs: Vec<Dxf>,
+    /// The workbook's own table styles by name: the differential format of each part (whole
+    /// table, header row, total row, first and second row stripes, first and last column).
+    table_styles: HashMap<String, [Option<usize>; 7]>,
 }
 
 /// The default palette behind `indexed` colours.
@@ -98,6 +112,34 @@ const INDEXED: [u32; 64] = [
     0xCCFFCC, 0xFFFF99, 0x99CCFF, 0xFF99CC, 0xCC99FF, 0xFFCC99, 0x3366FF, 0x33CCCC, 0x99CC00, 0xFFCC00, 0xFF9900, 0xFF6600, 0x666699, 0x969696,
     0x003366, 0x339966, 0x003300, 0x333300, 0x993300, 0x993366, 0x333399, 0x333333,
 ];
+
+fn rgb24(v: u32) -> [f64; 3] {
+    [((v >> 16) & 0xFF) as f64 / 255.0, ((v >> 8) & 0xFF) as f64 / 255.0, (v & 0xFF) as f64 / 255.0]
+}
+
+/// A number format's colour tag: one of its eight colour names, or `ColorN` (1–56), the indexed
+/// palette from its ninth entry.
+fn format_color(tag: &str) -> Option<[f64; 3]> {
+    let lower = tag.trim().to_ascii_lowercase();
+    let v = match lower.as_str() {
+        "black" => 0x000000,
+        "white" => 0xFFFFFF,
+        "red" => 0xFF0000,
+        "green" => 0x00FF00,
+        "blue" => 0x0000FF,
+        "yellow" => 0xFFFF00,
+        "magenta" => 0xFF00FF,
+        "cyan" => 0x00FFFF,
+        _ => {
+            let k: usize = lower.strip_prefix("color")?.trim().parse().ok()?;
+            if !(1..=56).contains(&k) {
+                return None;
+            }
+            *INDEXED.get(k + 7)?
+        }
+    };
+    Some(rgb24(v))
+}
 
 fn color(n: Node<'_, '_>, theme: &[[f64; 3]]) -> Option<[f64; 3]> {
     let mut c = if let Some(rgb) = attr(n, "rgb") {
@@ -111,8 +153,7 @@ fn color(n: Node<'_, '_>, theme: &[[f64; 3]]) -> Option<[f64; 3]> {
             // System foreground.
             [0.0; 3]
         } else {
-            let v = *INDEXED.get(i)?;
-            [((v >> 16) & 0xFF) as f64 / 255.0, ((v >> 8) & 0xFF) as f64 / 255.0, (v & 0xFF) as f64 / 255.0]
+            rgb24(*INDEXED.get(i)?)
         }
     };
     if let Some(t) = attr_f64(n, "tint").filter(|t| t.is_finite()) {
@@ -122,7 +163,7 @@ fn color(n: Node<'_, '_>, theme: &[[f64; 3]]) -> Option<[f64; 3]> {
     Some(c)
 }
 
-fn theme_colors(zip: &Zip<'_>, rels: &Rels) -> Vec<[f64; 3]> {
+pub(super) fn theme_colors(zip: &Zip<'_>, rels: &Rels) -> Vec<[f64; 3]> {
     // Excel's order: lt1, dk1, lt2, dk2, accent1–6, hlink, folHlink.
     let mut out = vec![[1.0; 3], [0.0; 3], [0.93, 0.93, 0.88], [0.27, 0.33, 0.42]];
     let Some(part) = rels.of_type("theme") else { return out };
@@ -182,10 +223,22 @@ fn load_styles(zip: &Zip<'_>, rels: &Rels, theme: &[[f64; 3]], notes: &mut Notes
         for n in children(f, "fill") {
             let fill = child(n, "patternFill").and_then(|p| {
                 let ty = attr(p, "patternType").unwrap_or("none");
-                if ty == "none" {
-                    return None;
-                }
-                child(p, "fgColor").and_then(|c| color(c, theme)).or_else(|| child(p, "bgColor").and_then(|c| color(c, theme)))
+                let fg = child(p, "fgColor").and_then(|c| color(c, theme));
+                let bg = child(p, "bgColor").and_then(|c| color(c, theme));
+                // A pattern prints as its dots or hatching over the background: drawn as the mix
+                // of the two in the share the pattern covers.
+                let share = match ty {
+                    "none" => return None,
+                    "solid" => return fg.or(bg),
+                    "gray0625" => 0.0625,
+                    "gray125" => 0.125,
+                    "lightGray" | "lightHorizontal" | "lightVertical" | "lightDown" | "lightUp" | "lightGrid" | "lightTrellis" => 0.25,
+                    "mediumGray" | "darkHorizontal" | "darkVertical" | "darkDown" | "darkUp" | "darkGrid" => 0.5,
+                    "darkGray" | "darkTrellis" => 0.75,
+                    _ => return fg.or(bg),
+                };
+                let (fg, bg) = (fg.unwrap_or([0.0; 3]), bg.unwrap_or([1.0; 3]));
+                Some([0, 1, 2].map(|i| bg[i] + (fg[i] - bg[i]) * share))
             });
             let fill =
                 fill.or_else(|| child(n, "gradientFill").and_then(|g| g.descendants().find(|n| is(*n, "color"))).and_then(|c| color(c, theme)));
@@ -203,17 +256,52 @@ fn load_styles(zip: &Zip<'_>, rels: &Rels, theme: &[[f64; 3]], notes: &mut Notes
                     "thick" | "double" => 1.5,
                     _ => 0.5,
                 };
-                Some(Edge { width, color: child(e, "color").and_then(|c| color(c, theme)).unwrap_or([0.0; 3]) })
+                let dash = match attr(e, "style")? {
+                    "hair" => Some("[0.5 0.5]"),
+                    "dotted" => Some("[1 1]"),
+                    "dashed" | "mediumDashed" => Some("[3 1.5]"),
+                    "dashDot" | "mediumDashDot" | "slantDashDot" => Some("[3 1.5 1 1.5]"),
+                    "dashDotDot" | "mediumDashDotDot" => Some("[3 1.5 1 1.5 1 1.5]"),
+                    _ => None,
+                };
+                let double = attr(e, "style") == Some("double");
+                Some(Edge {
+                    width: if double { 0.5 } else { width },
+                    color: child(e, "color").and_then(|c| color(c, theme)).unwrap_or([0.0; 3]),
+                    dash,
+                    double,
+                })
             };
+            let up = flag(attr(n, "diagonalUp")) && attr(n, "diagonalUp").is_some();
+            let down = flag(attr(n, "diagonalDown")) && attr(n, "diagonalDown").is_some();
             s.borders.push(Edges {
                 left: edge(["left", "start"]),
                 right: edge(["right", "end"]),
                 top: edge(["top", "top"]),
                 bottom: edge(["bottom", "bottom"]),
+                diagonal: edge(["diagonal", "diagonal"]).filter(|_| up || down).map(|e| (e, up, down)),
             });
         }
     }
     s.dxfs = cf::dxfs(root, &|n| color(n, theme));
+    for t in child(root, "tableStyles").into_iter().flat_map(|t| children(t, "tableStyle")).take(1_000) {
+        let Some(name) = attr(t, "name") else { continue };
+        let mut parts = [None; 7];
+        for e in children(t, "tableStyleElement") {
+            let slot = match attr(e, "type") {
+                Some("wholeTable") => 0,
+                Some("headerRow") => 1,
+                Some("totalRow") => 2,
+                Some("firstRowStripe") => 3,
+                Some("secondRowStripe") => 4,
+                Some("firstColumn") => 5,
+                Some("lastColumn") => 6,
+                _ => continue,
+            };
+            parts[slot] = attr_f64(e, "dxfId").filter(|v| v.is_finite() && *v >= 0.0).map(|v| v.min(1e6) as usize);
+        }
+        s.table_styles.insert(name.to_owned(), parts);
+    }
     if let Some(f) = child(root, "cellXfs") {
         for n in children(f, "xf") {
             let al = child(n, "alignment");
@@ -227,6 +315,8 @@ fn load_styles(zip: &Zip<'_>, rels: &Rels, theme: &[[f64; 3]], notes: &mut Notes
                 v_align: al.and_then(|a| attr(a, "vertical")).map(str::to_owned),
                 wrap: al.is_some_and(|a| flag(attr(a, "wrapText")) && attr(a, "wrapText").is_some()),
                 indent: al.and_then(|a| attr_f64(a, "indent")).unwrap_or(0.0).clamp(0.0, 250.0),
+                rotation: al.and_then(|a| attr_f64(a, "textRotation")).map_or(0, |v| v.clamp(0.0, 255.0) as u16).min(255),
+                shrink: al.is_some_and(|a| flag(attr(a, "shrinkToFit")) && attr(a, "shrinkToFit").is_some()),
             });
         }
     }
@@ -397,7 +487,7 @@ struct Section {
     text_at: bool,
     date: bool,
     tokens: Vec<String>,
-    red: bool,
+    color: Option<[f64; 3]>,
     lcid: u32,
 }
 
@@ -482,8 +572,8 @@ fn parse_section(sec: &str) -> Section {
                     tag.push(q);
                 }
                 let lower = tag.to_ascii_lowercase();
-                if lower == "red" {
-                    s.red = true;
+                if let Some(c) = format_color(&tag) {
+                    s.color = Some(c);
                 } else if let Some(rest) = tag.strip_prefix('$') {
                     let (sym, lcid) = rest.split_once('-').unwrap_or((rest, ""));
                     s.lcid = u32::from_str_radix(lcid.trim(), 16).unwrap_or(0);
@@ -662,26 +752,46 @@ fn date(serial: f64, sec: &Section, date1904: bool) -> Option<String> {
     Some(out)
 }
 
-/// Format a number with a format code. Returns the text and whether it is red.
-fn format_number(v: f64, code: &str, date1904: bool) -> (String, bool) {
+/// Format a number with a format code. Returns the text and its section's colour, if any.
+fn format_number(v: f64, code: &str, date1904: bool) -> (String, Option<[f64; 3]>) {
     if code.eq_ignore_ascii_case("general") || code.is_empty() {
-        return (general(v), false);
+        return (general(v), None);
     }
     let secs = sections(code);
-    let (sec_text, negative_section) = match (secs.len(), v) {
-        (_, v) if v > 0.0 => (secs.first(), false),
-        (1, _) => (secs.first(), false),
-        (_, v) if v < 0.0 => (secs.get(1), true),
-        (2, _) => (secs.first(), false),
-        _ => (secs.get(2).or(secs.first()), false),
+    let (sec_text, negative_section) = match secs.first().and_then(|s| section_condition(s)) {
+        // Conditional sections (`[>=100]0;[<0]-0.0;0.00`): the first whose condition holds, else
+        // the last; the number keeps its sign.
+        Some(first) => {
+            if first.holds(v) {
+                (secs.first(), false)
+            } else {
+                match secs.get(1).and_then(|s| section_condition(s)) {
+                    Some(second) if second.holds(v) => (secs.get(1), false),
+                    Some(_) => (secs.get(2).or(secs.get(1)), false),
+                    None => (secs.get(1).or(secs.first()), false),
+                }
+            }
+        }
+        None => match (secs.len(), v) {
+            (_, v) if v > 0.0 => (secs.first(), false),
+            (1, _) => (secs.first(), false),
+            (_, v) if v < 0.0 => (secs.get(1), true),
+            (2, _) => (secs.first(), false),
+            _ => (secs.get(2).or(secs.first()), false),
+        },
     };
     let sec = parse_section(sec_text.map_or("General", String::as_str));
+    if !sec.date
+        && let Some(f) = sec_text.and_then(|s| fraction(if negative_section { v.abs() } else { v }, s))
+    {
+        return (f, sec.color);
+    }
     if sec.date {
-        return (date(v, &sec, date1904).unwrap_or_else(|| general(v)), sec.red);
+        return (date(v, &sec, date1904).unwrap_or_else(|| general(v)), sec.color);
     }
     if sec_text.is_some_and(|s| s.to_ascii_lowercase().contains("general")) {
         let g = general(if negative_section { v.abs() } else { v });
-        return (format!("{}{g}{}", sec.prefix.replace("General", ""), sec.suffix), sec.red);
+        return (format!("{}{g}{}", sec.prefix.replace("General", ""), sec.suffix), sec.color);
     }
     let (dec_sep, group_sep) = if comma_decimal(sec.lcid) { (',', '.') } else { ('.', ',') };
     let mut x = if negative_section { v.abs() } else { v };
@@ -745,7 +855,201 @@ fn format_number(v: f64, code: &str, date1904: bool) -> (String, bool) {
             b
         }
     };
-    (format!("{}{body}{}", sec.prefix, sec.suffix), sec.red)
+    (format!("{}{body}{}", sec.prefix, sec.suffix), sec.color)
+}
+
+/// A number format section's condition (`[>100]`, `[<=0]`, `[<>5]`).
+#[derive(Clone, Copy)]
+struct Condition {
+    op: &'static str,
+    value: f64,
+}
+
+impl Condition {
+    fn holds(self, v: f64) -> bool {
+        match self.op {
+            "<" => v < self.value,
+            "<=" => v <= self.value,
+            ">" => v > self.value,
+            ">=" => v >= self.value,
+            "<>" => v != self.value,
+            _ => v == self.value,
+        }
+    }
+}
+
+fn section_condition(sec: &str) -> Option<Condition> {
+    let (mut quoted, mut i) = (false, 0usize);
+    let chars: Vec<char> = sec.chars().collect();
+    while let Some(&c) = chars.get(i) {
+        match c {
+            '"' => quoted = !quoted,
+            '[' if !quoted => {
+                let tag: String = chars[i + 1..].iter().take_while(|c| **c != ']').collect();
+                let op = ["<=", ">=", "<>", "<", ">", "="].into_iter().find(|op| tag.starts_with(op));
+                if let Some(op) = op
+                    && let Ok(value) = tag[op.len()..].trim().parse::<f64>()
+                {
+                    return Some(Condition { op, value });
+                }
+                i += tag.chars().count() + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// A fraction format (`# ?/?`, `# ??/??`, `?/8`): the whole part when the section has one, then
+/// the nearest fraction with at most as many denominator digits as it asks (or its fixed
+/// denominator), padded where it uses `?`.
+fn fraction(v: f64, sec: &str) -> Option<String> {
+    // The section without its quoted text and bracketed tags.
+    let mut plain = String::new();
+    let (mut quoted, mut tag) = (false, false);
+    for c in sec.chars() {
+        match c {
+            '"' => quoted = !quoted,
+            '[' if !quoted => tag = true,
+            ']' if tag => tag = false,
+            _ if quoted || tag => {}
+            _ => plain.push(c),
+        }
+    }
+    let (left, right) = plain.split_once('/')?;
+    let num_len = left.chars().rev().take_while(|c| matches!(c, '#' | '?' | '0')).count();
+    let den: String = right.chars().take_while(|c| c.is_ascii_digit() || matches!(c, '#' | '?' | '0')).collect();
+    if num_len == 0 || den.is_empty() {
+        return None;
+    }
+    let whole = left[..left.len() - num_len].trim_end().chars().any(|c| matches!(c, '#' | '?' | '0'));
+    if !v.is_finite() || v.abs() > 1e15 {
+        return None;
+    }
+    let a = v.abs();
+    let (mut int, frac) = if whole { (a.trunc(), a.fract()) } else { (0.0, a) };
+    let (mut n, d) = match den.parse::<u64>() {
+        Ok(fixed) if fixed > 0 => ((frac * fixed as f64).round() as u64, fixed),
+        _ => {
+            let max = 10u64.pow(den.len().min(4) as u32) - 1;
+            let mut best = (frac.round() as u64, 1u64, f64::INFINITY);
+            for d in 1..=max.max(1) {
+                let n = (frac * d as f64).round();
+                let err = (frac - n / d as f64).abs();
+                if err < best.2 - 1e-12 {
+                    best = (n as u64, d, err);
+                }
+            }
+            (best.0, best.1)
+        }
+    };
+    if whole && n >= d {
+        int += (n / d) as f64;
+        n %= d;
+    }
+    let sign = if v < 0.0 { "-" } else { "" };
+    let pad = |s: String, len: usize, right: bool| if right { format!("{s:<len$}") } else { format!("{s:>len$}") };
+    if n == 0 && whole {
+        // A whole number: the fraction's room is left blank.
+        return Some(format!("{sign}{int:.0}{}", " ".repeat(num_len + den.len() + 2)));
+    }
+    let f = format!("{}/{}", pad(n.to_string(), num_len, false), pad(d.to_string(), den.len(), true));
+    Some(match (whole, int > 0.0) {
+        (true, true) => format!("{sign}{int:.0} {f}"),
+        (true, false) => format!("{sign}{f}"),
+        (false, _) => format!("{sign}{}", f.trim_start()),
+    })
+}
+
+/// The shortest General form of `v` whose width fits `room`: fewer decimals, then scientific
+/// notation with fewer digits, as Excel shows General numbers in narrow columns.
+fn general_fit(v: f64, room: f64, width: &dyn Fn(&str) -> f64) -> Option<String> {
+    let full = general(v);
+    if width(&full) <= room {
+        return Some(full);
+    }
+    for digits in (0..10usize).rev() {
+        let s = format!("{v:.digits$}");
+        let s = if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').to_string() } else { s };
+        if (v.abs() < 1e11 || digits == 0) && width(&s) <= room && s.trim_start_matches('-') != "0" {
+            return Some(s);
+        }
+    }
+    for digits in (0..6usize).rev() {
+        let s = format!("{v:.digits$E}");
+        let (m, e) = s.split_once('E').unwrap_or((&s, "0"));
+        let e: i32 = e.parse().unwrap_or(0);
+        let s = format!("{m}E{}{:02}", if e < 0 { '-' } else { '+' }, e.abs());
+        if width(&s) <= room {
+            return Some(s);
+        }
+    }
+    None
+}
+
+/// Format text with a format's text section (its fourth, or an only section holding `@`): the
+/// literals around `@` and the section's colour. Other formats show text as it is.
+fn format_text(t: &str, code: &str) -> (String, Option<[f64; 3]>) {
+    let secs = sections(code);
+    let sec = match secs.len() {
+        4.. => secs.get(3),
+        1 if secs.first().is_some_and(|s| s.contains('@')) => secs.first(),
+        _ => None,
+    };
+    let Some(sec) = sec else { return (t.to_owned(), None) };
+    let (mut out, mut colour) = (String::new(), None);
+    let mut chars = sec.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => out.extend(chars.by_ref().take_while(|q| *q != '"')),
+            '\\' => out.extend(chars.next()),
+            '_' => {
+                chars.next();
+                out.push(' ');
+            }
+            '*' => {
+                chars.next();
+            }
+            '[' => {
+                let tag: String = chars.by_ref().take_while(|q| *q != ']').collect();
+                colour = format_color(&tag).or(colour);
+            }
+            '@' => out.push_str(t),
+            _ => out.push(c),
+        }
+        if out.len() > MAX_TEXT_BYTES {
+            break;
+        }
+    }
+    (out, colour)
+}
+
+/// A `t="d"` cell's ISO 8601 date, time or both as a date serial.
+fn iso_serial(s: &str, date1904: bool) -> Option<f64> {
+    let s = s.trim();
+    let (day, time) = match s.split_once('T') {
+        Some((d, t)) => (Some(d), Some(t)),
+        None if s.contains(':') => (None, Some(s)),
+        None => (Some(s), None),
+    };
+    let mut serial = 0.0;
+    if let Some(day) = day {
+        let date = chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").ok()?;
+        let base = if date1904 { chrono::NaiveDate::from_ymd_opt(1904, 1, 1)? } else { chrono::NaiveDate::from_ymd_opt(1899, 12, 30)? };
+        serial = (date - base).num_days() as f64;
+        // The 1900 system counts a 29 February 1900 that never was: earlier days are one less.
+        if !date1904 && serial < 61.0 {
+            serial -= 1.0;
+        }
+    }
+    if let Some(time) = time {
+        let time = time.trim_end_matches('Z');
+        let time = time.find(['+', '-']).map_or(time, |i| &time[..i]);
+        let t = chrono::NaiveTime::parse_from_str(time, "%H:%M:%S%.f").or_else(|_| chrono::NaiveTime::parse_from_str(time, "%H:%M")).ok()?;
+        serial += f64::from(t.num_seconds_from_midnight()) / 86_400.0 + f64::from(t.nanosecond()) / 86_400e9;
+    }
+    serial.is_finite().then_some(serial)
 }
 
 // ── sheets ──────────────────────────────────────────────────────────────────────────────────
@@ -758,7 +1062,70 @@ struct Cell {
     numeric: bool,
     boolean: bool,
     xf: usize,
-    red: bool,
+    /// The number format's colour, over the font's.
+    color: Option<[f64; 3]>,
+    /// Rich text: the runs of a shared or inline string with fonts of their own.
+    runs: Option<Arc<Vec<Rich>>>,
+    /// The cell's hyperlink.
+    link: Option<Arc<LinkTarget>>,
+    /// A number in the General format, which is shortened to fit a narrow column.
+    general: bool,
+}
+
+/// A run of rich text in a cell and, when it has run properties, its own font.
+#[derive(Clone, Debug)]
+struct Rich {
+    text: String,
+    look: Option<RichLook>,
+}
+
+/// A rich text run's properties (`rPr`): what it leaves out comes from the cell's font for the
+/// name, size and colour, and is off for the rest.
+#[derive(Clone, Debug, Default)]
+struct RichLook {
+    name: Option<String>,
+    size: Option<f64>,
+    color: Option<[f64; 3]>,
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    strike: bool,
+    vert: i8,
+}
+
+/// A shared string: its text and, when its runs carry fonts, the runs.
+struct Shared {
+    text: String,
+    runs: Option<Arc<Vec<Rich>>>,
+}
+
+/// A string item's (`si`, `is`) text and rich runs. Phonetic runs (rPh) are reading aids, not text.
+fn string_item(si: Node<'_, '_>, theme: &[[f64; 3]]) -> Shared {
+    let text = si.descendants().filter(|n| is(*n, "t") && !n.ancestors().any(|a| is(a, "rPh"))).filter_map(|t| t.text()).collect();
+    let runs: Vec<Rich> = children(si, "r")
+        .map(|r| Rich {
+            text: xml::text_of(r, "t"),
+            look: child(r, "rPr").map(|p| {
+                let on = |k: &str| child(p, k).is_some_and(|c| flag(attr(c, "val")));
+                RichLook {
+                    name: child(p, "rFont").and_then(|c| attr(c, "val")).map(str::to_owned),
+                    size: child(p, "sz").and_then(|c| attr_f64(c, "val")).filter(|v| v.is_finite()).map(|v| v.clamp(1.0, 400.0)),
+                    color: child(p, "color").and_then(|c| color(c, theme)),
+                    bold: on("b"),
+                    italic: on("i"),
+                    underline: child(p, "u").is_some_and(|c| attr(c, "val") != Some("none")),
+                    strike: on("strike"),
+                    vert: match child(p, "vertAlign").and_then(|c| attr(c, "val")) {
+                        Some("superscript") => 1,
+                        Some("subscript") => -1,
+                        _ => 0,
+                    },
+                }
+            }),
+        })
+        .collect();
+    let runs = runs.iter().any(|r| r.look.is_some()).then(|| Arc::new(runs));
+    Shared { text, runs }
 }
 
 /// The year and month of a date serial (1900 date system).
@@ -783,17 +1150,18 @@ pub(super) fn col_index(r: &str) -> Option<(u32, u32)> {
     ((1..=MAX_COL).contains(&col) && (1..=MAX_ROW).contains(&row)).then_some((row, col))
 }
 
-/// Points for an Excel column width in characters (the Calibri 11 maximum digit width, 7 px).
-fn col_points(chars: f64) -> f64 {
-    let px = (chars * 7.0 + 5.0).floor().max(0.0);
+/// Points for an Excel column width in characters, `mdw` being the maximum digit width in
+/// pixels (Calibri 11: 7 px in Excel for Windows, 8 px in Excel for Mac).
+fn col_points(chars: f64, mdw: f64) -> f64 {
+    let px = (chars * mdw + 5.0).floor().max(0.0);
     px * 0.75
 }
 
 /// A stored column width (`<col width>`, `defaultColWidth`) in points. Stored widths already
 /// include the 5 px of padding (ECMA-376 Part 1, §18.3.1.13): pixels are
-/// `trunc((256·width + trunc(128/7)) / 256 · 7)`.
-fn stored_col_points(width: f64) -> f64 {
-    let px = ((256.0 * width + 18.0) / 256.0 * 7.0).trunc().max(0.0);
+/// `trunc((256·width + trunc(128/mdw)) / 256 · mdw)`.
+fn stored_col_points(width: f64, mdw: f64) -> f64 {
+    let px = ((256.0 * width + (128.0 / mdw).trunc()) / 256.0 * mdw).trunc().max(0.0);
     px * 0.75
 }
 
@@ -819,6 +1187,8 @@ struct Sheet {
     hf_pictures: Pictures,
     h_center: bool,
     v_center: bool,
+    /// Row numbers and column letters printed with the cells (`printOptions@headings`).
+    headings: bool,
     /// Pages printed across, then down (`pageOrder="overThenDown"`).
     over_then_down: bool,
     /// Manual page breaks: a new page starts after these rows and columns.
@@ -832,16 +1202,30 @@ struct Sheet {
     drawings: Vec<Drawn>,
     /// How conditional formatting changes cells.
     looks: HashMap<(u32, u32), Look>,
+    /// Comments printed after the sheet (`cellComments="atEnd"`): cell reference and text.
+    end_comments: Vec<(String, String)>,
+    /// The sheet's own first page number (`pageSetup useFirstPageNumber firstPageNumber`).
+    first_number: Option<usize>,
+    /// Sparklines: the cell each is drawn in, its kind (0 line, 1 column, 2 win/loss), colour and
+    /// values.
+    sparklines: Vec<Sparkline>,
+    /// Formatted tables' (Insert ▸ Table) look in their cells: fill, font colour, bold, and
+    /// borders, under the cells' own formatting.
+    table_looks: HashMap<(u32, u32), (TableCell, Edges)>,
 }
 
 /// What a sheet is read with besides its part.
 struct Book<'a> {
-    shared: &'a [String],
+    shared: &'a [Shared],
     styles: &'a Styles,
     theme: &'a [[f64; 3]],
     date1904: bool,
     /// Today as a date serial, for time-period rules.
     today: f64,
+    /// The maximum digit width column widths count in, in pixels: Excel for Mac's (8) for a
+    /// workbook it saved, else Excel for Windows' (7). Column widths are stored in digits, so
+    /// the same file prints wider on a Mac.
+    mdw: f64,
 }
 
 fn read_sheet(zip: &Zip<'_>, part: &str, book: &Book<'_>, doc: &mut Document, notes: &mut Notes) -> Result<Sheet, String> {
@@ -851,7 +1235,8 @@ fn read_sheet(zip: &Zip<'_>, part: &str, book: &Book<'_>, doc: &mut Document, no
     let root = d.root_element();
     let fmt = child(root, "sheetFormatPr");
     let base = fmt.and_then(|f| attr_f64(f, "baseColWidth")).unwrap_or(8.0);
-    let default_w = fmt.and_then(|f| attr_f64(f, "defaultColWidth")).map_or(col_points(base + 0.43), stored_col_points);
+    let mdw = book.mdw;
+    let default_w = fmt.and_then(|f| attr_f64(f, "defaultColWidth")).map_or(col_points(base + 0.43, mdw), |w| stored_col_points(w, mdw));
     let default_h = fmt.and_then(|f| attr_f64(f, "defaultRowHeight")).unwrap_or(15.0).clamp(1.0, 409.0);
     let mut sh = Sheet {
         cells: BTreeMap::new(),
@@ -882,6 +1267,7 @@ fn read_sheet(zip: &Zip<'_>, part: &str, book: &Book<'_>, doc: &mut Document, no
         hf: HeaderFooter::default(),
         hf_pictures: Pictures::new(),
         h_center: child(root, "printOptions").is_some_and(|p| flag(attr(p, "horizontalCentered")) && attr(p, "horizontalCentered").is_some()),
+        headings: child(root, "printOptions").is_some_and(|p| flag(attr(p, "headings")) && attr(p, "headings").is_some()),
         v_center: child(root, "printOptions").is_some_and(|p| flag(attr(p, "verticalCentered")) && attr(p, "verticalCentered").is_some()),
         over_then_down: child(root, "pageSetup").and_then(|p| attr(p, "pageOrder")) == Some("overThenDown"),
         row_breaks: BTreeSet::new(),
@@ -891,6 +1277,14 @@ fn read_sheet(zip: &Zip<'_>, part: &str, book: &Book<'_>, doc: &mut Document, no
         title_cols: None,
         drawings: Vec::new(),
         looks: HashMap::new(),
+        end_comments: Vec::new(),
+        table_looks: HashMap::new(),
+        sparklines: Vec::new(),
+        first_number: child(root, "pageSetup")
+            .filter(|p| flag(attr(*p, "useFirstPageNumber")) && attr(*p, "useFirstPageNumber").is_some())
+            .and_then(|p| attr_f64(p, "firstPageNumber"))
+            .filter(|v| v.is_finite())
+            .map(|v| v.clamp(0.0, 1e6) as usize),
     };
     if let Some(m) = child(root, "pageMargins") {
         let g = |k: &str, d: f64| attr_f64(m, k).map_or(d, |v| (v * 72.0).clamp(0.0, 300.0));
@@ -919,6 +1313,17 @@ fn read_sheet(zip: &Zip<'_>, part: &str, book: &Book<'_>, doc: &mut Document, no
         }
     }
     let rels = Rels::load(zip, part).ok();
+    match child(root, "pageSetup").and_then(|p| attr(p, "cellComments")) {
+        Some("atEnd") => {
+            if let Some(target) = rels.as_ref().and_then(|r| r.of_type("comments")) {
+                sh.end_comments = comments(zip, target);
+            }
+        }
+        Some("asDisplayed") if rels.as_ref().is_some_and(|r| r.of_type("comments").is_some()) => {
+            notes.add("comments printed as displayed on the sheet, left out");
+        }
+        _ => {}
+    }
     if let Some(target) = child(root, "drawing").and_then(|d| rel_attr(d, "id")).and_then(|id| rels.as_ref()?.target(id)) {
         sh.drawings = drawing::read(zip, target, doc, book.theme, notes);
     }
@@ -937,7 +1342,7 @@ fn read_sheet(zip: &Zip<'_>, part: &str, book: &Book<'_>, doc: &mut Document, no
             };
             budget = left;
             let hidden = flag(attr(c, "hidden")) && attr(c, "hidden").is_some();
-            let w = attr_f64(c, "width").map(stored_col_points);
+            let w = attr_f64(c, "width").map(|w| stored_col_points(w, mdw));
             for col in min..=max {
                 if hidden {
                     sh.hidden_cols.insert(col);
@@ -949,6 +1354,7 @@ fn read_sheet(zip: &Zip<'_>, part: &str, book: &Book<'_>, doc: &mut Document, no
     }
     let mut count = 0usize;
     let mut next_row = 1u32;
+    let mut uncached: Vec<((u32, u32), String, usize)> = Vec::new();
     let mut text_bytes = 0usize;
     if let Some(data) = child(root, "sheetData") {
         for row in children(data, "row") {
@@ -974,13 +1380,56 @@ fn read_sheet(zip: &Zip<'_>, part: &str, book: &Book<'_>, doc: &mut Document, no
                 let ty = attr(c, "t").unwrap_or("n");
                 let v = child(c, "v").and_then(|v| v.text()).unwrap_or_default();
                 if child(c, "f").is_some() && child(c, "v").is_none() && ty != "inlineStr" {
-                    notes.add("formulas without a saved result, left empty");
+                    // Calculated below, once the sheet's values are known.
+                    match child(c, "f").and_then(|f| f.text()).filter(|t| !t.trim().is_empty()) {
+                        Some(f) if uncached.len() < 10_000 => uncached.push(((rr, cc), f.to_owned(), xf)),
+                        _ => notes.add("formulas without a saved result, left empty"),
+                    }
                 }
-                let mut cell = Cell { text: String::new(), value: None, numeric: false, boolean: false, xf, red: false };
+                let mut cell = Cell {
+                    text: String::new(),
+                    value: None,
+                    numeric: false,
+                    boolean: false,
+                    xf,
+                    color: None,
+                    runs: None,
+                    link: None,
+                    general: false,
+                };
+                let code = || {
+                    let id = styles.xfs.get(xf).map_or(0, |x| x.num_fmt);
+                    styles.formats.get(&id).map_or_else(|| builtin_format(id), String::as_str)
+                };
                 match ty {
-                    "s" => cell.text = v.trim().parse::<usize>().ok().and_then(|i| shared.get(i)).cloned().unwrap_or_default(),
-                    "inlineStr" => cell.text = child(c, "is").map(|i| xml::text_of(i, "t")).unwrap_or_default(),
-                    "str" => cell.text = v.to_owned(),
+                    "s" | "inlineStr" | "str" => {
+                        let item = match ty {
+                            "s" => v.trim().parse::<usize>().ok().and_then(|i| shared.get(i)).map(|s| (s.text.clone(), s.runs.clone())),
+                            "inlineStr" => child(c, "is").map(|i| string_item(i, book.theme)).map(|s| (s.text, s.runs)),
+                            _ => Some((v.to_owned(), None)),
+                        };
+                        let (text, runs) = item.unwrap_or_default();
+                        let (text, colour) = format_text(&text, code());
+                        // A text section's literals change the text: the runs no longer match.
+                        cell.runs = runs.filter(|r| r.iter().map(|r| r.text.len()).sum::<usize>() == text.len());
+                        cell.text = text;
+                        cell.color = colour;
+                    }
+                    "d" => {
+                        if let Some(x) = iso_serial(v, date1904) {
+                            let code = match code() {
+                                "General" | "general" | "" => "yyyy-mm-dd",
+                                c => c,
+                            };
+                            let (t, colour) = format_number(x, code, date1904);
+                            cell.text = t;
+                            cell.color = colour;
+                            cell.numeric = true;
+                            cell.value = Some(x);
+                        } else {
+                            cell.text = v.to_owned();
+                        }
+                    }
                     "b" => {
                         cell.text = if v.trim() == "1" { "TRUE".into() } else { "FALSE".into() };
                         cell.boolean = true;
@@ -993,13 +1442,12 @@ fn read_sheet(zip: &Zip<'_>, part: &str, book: &Book<'_>, doc: &mut Document, no
                         if let Ok(x) = v.trim().parse::<f64>()
                             && x.is_finite()
                         {
-                            let id = styles.xfs.get(xf).map_or(0, |x| x.num_fmt);
-                            let code = styles.formats.get(&id).map_or_else(|| builtin_format(id), String::as_str);
-                            let (t, red) = format_number(x, code, date1904);
+                            let (t, colour) = format_number(x, code(), date1904);
                             cell.text = t;
-                            cell.red = red;
+                            cell.color = colour;
                             cell.numeric = true;
                             cell.value = Some(x);
+                            cell.general = code().eq_ignore_ascii_case("general");
                         }
                     }
                 }
@@ -1015,6 +1463,97 @@ fn read_sheet(zip: &Zip<'_>, part: &str, book: &Book<'_>, doc: &mut Document, no
                     sh.cells.insert((rr, cc), cell);
                 }
             }
+        }
+    }
+    // Formulas saved without a result (written by tools that don't calculate): the ones the
+    // evaluator knows are calculated from the saved values.
+    // A formula reading another one's result sees it from the next pass on.
+    for pass in 0..3 {
+        if uncached.is_empty() {
+            break;
+        }
+        let last = pass == 2;
+        let mut results = Vec::with_capacity(uncached.len());
+        {
+            let values: cf::Cells<'_> = sh.cells.iter().map(|(k, c)| (*k, cf::Value { number: c.value, text: &c.text })).collect();
+            for (at, f, xf) in &uncached {
+                let value = super::xlsx_formula::parse(f, *at).map(|p| p.eval(&values, *at, book.today));
+                results.push((*at, *xf, value));
+            }
+        }
+        for (at, xf, value) in results {
+            let id = styles.xfs.get(xf).map_or(0, |x| x.num_fmt);
+            let code = styles.formats.get(&id).map_or_else(|| builtin_format(id), String::as_str);
+            let mut cell =
+                Cell { text: String::new(), value: None, numeric: false, boolean: false, xf, color: None, runs: None, link: None, general: false };
+            match value {
+                Some(super::xlsx_formula::Value::Num(x)) if x.is_finite() => {
+                    let (t, colour) = format_number(x, code, date1904);
+                    cell = Cell { text: t, value: Some(x), numeric: true, color: colour, general: code.eq_ignore_ascii_case("general"), ..cell };
+                }
+                Some(super::xlsx_formula::Value::Text(t)) => cell.text = t.chars().take(32_767).collect(),
+                Some(super::xlsx_formula::Value::Bool(b)) => {
+                    cell = Cell { text: if b { "TRUE".into() } else { "FALSE".into() }, boolean: true, ..cell }
+                }
+                Some(super::xlsx_formula::Value::Empty) => cell = Cell { text: "0".into(), value: Some(0.0), numeric: true, ..cell },
+                _ => {
+                    if last {
+                        notes.add("formulas without a saved result, left empty");
+                    }
+                    continue;
+                }
+            }
+            sh.cells.insert(at, cell);
+        }
+    }
+    // Sparklines (an Excel 2010 extension): each one's values from a range of this sheet.
+    for group in root.descendants().filter(|n| is(*n, "sparklineGroup")).take(1_000) {
+        let kind = match attr(group, "type") {
+            Some("column") => 1,
+            Some("stacked") => 2,
+            _ => 0,
+        };
+        let colour = child(group, "colorSeries").and_then(|c| color(c, book.theme)).unwrap_or([0.21, 0.37, 0.57]);
+        for sl in group.descendants().filter(|n| is(*n, "sparkline")).take(10_000) {
+            let (Some(range), Some(at)) = (child(sl, "f").and_then(|f| f.text()), child(sl, "sqref").and_then(|f| f.text()).and_then(col_index))
+            else {
+                continue;
+            };
+            let range = range.rsplit('!').next().unwrap_or(range).replace('$', "");
+            let (a, b) = range.split_once(':').unwrap_or((&range, &range));
+            let (Some((r1, c1)), Some((r2, c2))) = (col_index(a), col_index(b)) else { continue };
+            let cols = c1.min(c2)..=c1.max(c2);
+            let values: Vec<f64> = sh
+                .cells
+                .range((r1.min(r2), c1.min(c2))..=(r1.max(r2), c1.max(c2)))
+                .filter(|((_, c), _)| cols.contains(c))
+                .filter_map(|(_, cell)| cell.value)
+                .take(1_000)
+                .collect();
+            if !values.is_empty() && sh.sparklines.len() < 10_000 {
+                sh.sparklines.push((at, kind, colour, values));
+            }
+        }
+    }
+    // Hyperlinks: an address (an external relationship) or a place in the workbook (a sheet).
+    let mut link_cells = 0usize;
+    for h in child(root, "hyperlinks").into_iter().flat_map(|h| children(h, "hyperlink")).take(10_000) {
+        let target = rel_attr(h, "id")
+            .and_then(|id| rels.as_ref()?.external(id))
+            .map(|u| LinkTarget::Uri(u.to_owned()))
+            .or_else(|| attr(h, "location").and_then(sheet_anchor).map(LinkTarget::Anchor));
+        let (Some(target), Some(range)) = (target, attr(h, "ref")) else { continue };
+        let target = Arc::new(target);
+        let (a, b) = range.split_once(':').unwrap_or((range, range));
+        let (Some((r1, c1)), Some((r2, c2))) = (col_index(a), col_index(b)) else { continue };
+        let cols = c1.min(c2)..=c1.max(c2);
+        // Keys run row by row: the range holds the rows' other columns too.
+        for (_, cell) in sh.cells.range_mut((r1.min(r2), c1.min(c2))..=(r1.max(r2), c1.max(c2))).filter(|((_, c), _)| cols.contains(c)) {
+            link_cells += 1;
+            if link_cells > 100_000 {
+                break;
+            }
+            cell.link.get_or_insert_with(|| target.clone());
         }
     }
     if let Some(m) = child(root, "mergeCells") {
@@ -1033,7 +1572,196 @@ fn read_sheet(zip: &Zip<'_>, part: &str, book: &Book<'_>, doc: &mut Document, no
         let values: cf::Cells<'_> = sh.cells.iter().map(|(k, c)| (*k, cf::Value { number: c.value, text: &c.text })).collect();
         sh.looks = cf::evaluate(root, &values, &styles.dxfs, &|n| color(n, book.theme), book.today, notes);
     }
+    for id in child(root, "tableParts").into_iter().flat_map(|t| children(t, "tablePart")).take(256).filter_map(|t| rel_attr(t, "id")) {
+        if let Some(target) = rels.as_ref().and_then(|r| r.target(id)) {
+            read_table(zip, target, styles, book.theme, &mut sh, notes);
+        }
+    }
     Ok(sh)
+}
+
+/// A sparkline: the cell it is drawn in, its kind (0 line, 1 column, 2 win/loss), colour and values.
+type Sparkline = ((u32, u32), u8, [f64; 3], Vec<f64>);
+
+/// A formatted table's look in one cell.
+#[derive(Clone, Copy, Debug, Default)]
+struct TableCell {
+    fill: Option<[f64; 3]>,
+    color: Option<[f64; 3]>,
+    bold: bool,
+}
+
+/// One part of a table style: its fill, font colour and boldness, and borders: around the part
+/// and between its rows and columns.
+#[derive(Clone, Copy, Debug, Default)]
+struct TablePart {
+    fill: Option<[f64; 3]>,
+    color: Option<[f64; 3]>,
+    bold: bool,
+    outline: Option<Edge>,
+    inner_h: Option<Edge>,
+    inner_v: Option<Edge>,
+}
+
+/// A table style: the whole table, header row, total row, row stripes and first and last columns.
+struct TableStyle {
+    parts: [TablePart; 7],
+}
+
+fn thin(color: [f64; 3]) -> Option<Edge> {
+    Some(Edge { width: 0.5, color, dash: None, double: false })
+}
+
+/// Excel's built-in table styles (`TableStyleLight1`… `TableStyleMedium28`, `TableStyleDark11`),
+/// which workbooks name but don't store: their families' look in the theme's colours.
+fn builtin_table_style(name: &str, theme: &[[f64; 3]]) -> Option<TableStyle> {
+    let (kind, n) =
+        ["Light", "Medium", "Dark"].iter().find_map(|k| Some((*k, name.strip_prefix("TableStyle")?.strip_prefix(k)?.parse::<usize>().ok()?)))?;
+    if n == 0 || n > 28 {
+        return None;
+    }
+    let (group, k) = ((n - 1) / 7, (n - 1) % 7);
+    let black = theme.get(1).copied().unwrap_or([0.0; 3]);
+    let accent = if k == 0 { black } else { theme.get(3 + k).copied().unwrap_or(black) };
+    let tint = |t: f64| accent.map(|v| v + (1.0 - v) * t);
+    let shade = |t: f64| accent.map(|v| v * t);
+    let white = Some([1.0; 3]);
+    let p = |fill: Option<[f64; 3]>, color: Option<[f64; 3]>, bold: bool| TablePart { fill, color, bold, ..TablePart::default() };
+    let mut parts = [TablePart::default(); 7];
+    match (kind, group) {
+        ("Light", 0) => {
+            let text = if k == 0 { None } else { Some(shade(0.75)) };
+            parts[0] = TablePart { color: text, outline: thin(accent), ..TablePart::default() };
+            parts[1] = TablePart { bold: true, outline: thin(accent), ..p(None, text, true) };
+            parts[3] = p(Some(tint(0.8)), None, false);
+        }
+        ("Light", 1) => {
+            parts[0] = TablePart { outline: thin(accent), inner_h: thin(accent), ..TablePart::default() };
+            parts[1] = p(Some(accent), white, true);
+        }
+        ("Light", _) => {
+            parts[0] = TablePart { outline: thin(accent), inner_h: thin(accent), inner_v: thin(accent), ..TablePart::default() };
+            parts[1] = p(None, None, true);
+            parts[3] = p(Some(tint(0.8)), None, false);
+        }
+        ("Medium", 0) => {
+            parts[0] = TablePart { outline: thin(tint(0.4)), inner_h: thin(tint(0.4)), ..TablePart::default() };
+            parts[1] = p(Some(accent), white, true);
+            parts[3] = p(Some(tint(0.8)), None, false);
+        }
+        ("Medium", 1) => {
+            parts[0] = TablePart { inner_h: thin([1.0; 3]), inner_v: thin([1.0; 3]), ..p(Some(tint(0.8)), None, false) };
+            parts[1] = p(Some(accent), white, true);
+            parts[3] = p(Some(tint(0.6)), None, false);
+        }
+        ("Medium", 2) => {
+            parts[0] = TablePart { outline: thin(black), ..TablePart::default() };
+            parts[1] = p(Some(black), white, true);
+            parts[3] = p(Some(tint(0.8)), None, false);
+        }
+        ("Medium", _) => {
+            parts[0] = TablePart { outline: thin(tint(0.4)), inner_h: thin(tint(0.4)), inner_v: thin(tint(0.4)), ..TablePart::default() };
+            parts[1] = p(Some(tint(0.6)), None, true);
+            parts[3] = p(Some(tint(0.8)), None, false);
+        }
+        ("Dark", 0) => {
+            parts[0] = p(Some(shade(0.5)), white, false);
+            parts[1] = p(Some(black), white, true);
+            parts[3] = p(Some(accent), white, false);
+        }
+        _ => {
+            parts[0] = p(Some(tint(0.6)), None, false);
+            parts[1] = p(Some(black), white, true);
+            parts[3] = p(Some(tint(0.4)), None, false);
+        }
+    }
+    parts[2] = TablePart { bold: true, outline: thin(accent), ..parts[0] };
+    parts[5].bold = true;
+    parts[6].bold = true;
+    Some(TableStyle { parts })
+}
+
+/// Read a formatted table (`xl/tables/table1.xml`) and give its cells the look of its style:
+/// the workbook's own style of that name, else Excel's built-in one.
+fn read_table(zip: &Zip<'_>, part: &str, styles: &Styles, theme: &[[f64; 3]], sh: &mut Sheet, notes: &mut Notes) {
+    let Ok(Some(text)) = zip.text(part) else { return };
+    let Ok(d) = xml::parse(&text) else { return };
+    let t = d.root_element();
+    let Some((a, b)) = attr(t, "ref").and_then(|r| r.split_once(':')) else { return };
+    let (Some((r1, c1)), Some((r2, c2))) = (col_index(a), col_index(b)) else { return };
+    let (r1, c1, r2, c2) = (r1.min(r2), c1.min(c2), r1.max(r2), c1.max(c2));
+    if u64::from(r2 - r1 + 1) * u64::from(c2 - c1 + 1) > 200_000 {
+        notes.add("formatted tables over 200 000 cells, drawn without their style");
+        return;
+    }
+    let info = child(t, "tableStyleInfo");
+    let Some(name) = info.and_then(|i| attr(i, "name")) else { return };
+    let show = |k: &str| info.and_then(|i| attr(i, k)).is_some_and(|v| flag(Some(v)));
+    let style = match styles.table_styles.get(name) {
+        Some(ids) => {
+            let mut parts = [TablePart::default(); 7];
+            for (slot, id) in ids.iter().enumerate() {
+                if let Some(dxf) = id.and_then(|i| styles.dxfs.get(i)) {
+                    parts[slot] = TablePart { fill: dxf.fill, color: dxf.color, bold: dxf.bold.unwrap_or(false), ..TablePart::default() };
+                }
+            }
+            TableStyle { parts }
+        }
+        None => match builtin_table_style(name, theme) {
+            Some(s) => s,
+            None => return,
+        },
+    };
+    let header_rows = attr_f64(t, "headerRowCount").map_or(1, |v| v.clamp(0.0, 1.0) as u32);
+    let total_rows = attr_f64(t, "totalsRowCount").map_or(0, |v| v.clamp(0.0, 1.0) as u32);
+    let [whole, header, total, stripe1, stripe2, first_col, last_col] = style.parts;
+    for r in r1..=r2 {
+        for c in c1..=c2 {
+            let part = if r < r1 + header_rows {
+                header
+            } else if total_rows > 0 && r == r2 {
+                total
+            } else if show("showRowStripes") && (r - r1 - header_rows).is_multiple_of(2) {
+                TablePart { fill: stripe1.fill.or(whole.fill), color: stripe1.color.or(whole.color), bold: stripe1.bold, ..whole }
+            } else if show("showRowStripes") {
+                TablePart { fill: stripe2.fill.or(whole.fill), color: stripe2.color.or(whole.color), bold: stripe2.bold, ..whole }
+            } else {
+                whole
+            };
+            let body = r >= r1 + header_rows && !(total_rows > 0 && r == r2);
+            let bold = part.bold
+                || (body && ((c == c1 && show("showFirstColumn") && first_col.bold) || (c == c2 && show("showLastColumn") && last_col.bold)));
+            let look = TableCell { fill: part.fill.or(whole.fill), color: part.color.or(whole.color), bold };
+            // Borders: the table's outline at its edges, its inner lines between cells, and a
+            // header's or total row's own lines.
+            let edge = |outer: bool, inner: Option<Edge>| if outer { whole.outline } else { inner };
+            let mut edges = Edges {
+                top: edge(r == r1, whole.inner_h),
+                bottom: edge(r == r2, whole.inner_h),
+                left: edge(c == c1, whole.inner_v),
+                right: edge(c == c2, whole.inner_v),
+                diagonal: None,
+            };
+            if r < r1 + header_rows {
+                edges.top = header.outline.or(edges.top);
+                edges.bottom = header.outline.or(edges.bottom);
+            } else if total_rows > 0 && r == r2 {
+                edges.top = total.outline.or(edges.top);
+            }
+            sh.table_looks.insert((r, c), (look, edges));
+            sh.cells.entry((r, c)).or_insert_with(|| Cell {
+                text: String::new(),
+                value: None,
+                numeric: false,
+                boolean: false,
+                xf: 0,
+                color: None,
+                runs: None,
+                link: None,
+                general: false,
+            });
+        }
+    }
 }
 
 /// The header and footer pictures of a `legacyDrawingHF` VML part, by shape id.
@@ -1061,14 +1789,82 @@ fn hf_pictures(zip: &Zip<'_>, part: &str, doc: &mut Document, notes: &mut Notes)
     out
 }
 
-fn shared_strings(zip: &Zip<'_>, rels: &Rels) -> Result<Vec<String>, String> {
+fn shared_strings(zip: &Zip<'_>, rels: &Rels, theme: &[[f64; 3]]) -> Result<Vec<Shared>, String> {
     let Some(part) = rels.of_type("sharedStrings") else { return Ok(Vec::new()) };
     let Some(text) = zip.text(part)? else { return Ok(Vec::new()) };
     let d = xml::parse(&text).map_err(|e| format!("{part}: {e}"))?;
-    // Phonetic runs (rPh) are reading aids, not text.
-    Ok(children(d.root_element(), "si")
-        .map(|si| si.descendants().filter(|n| is(*n, "t") && !n.ancestors().any(|a| is(a, "rPh"))).filter_map(|t| t.text()).collect())
-        .collect())
+    Ok(children(d.root_element(), "si").map(|si| string_item(si, theme)).collect())
+}
+
+/// The anchor of a workbook place a hyperlink names (`Sheet2!A1`, `'My sheet'!B2`): its sheet.
+fn sheet_anchor(location: &str) -> Option<String> {
+    let (sheet, _) = location.rsplit_once('!')?;
+    let sheet = sheet.trim().trim_matches('\'').replace("''", "'");
+    (!sheet.is_empty()).then(|| format!("sheet:{}", sheet.to_lowercase()))
+}
+
+/// A comments part's comments in order: the cell each is on and its text (Excel saves the
+/// author's name as the text's first line).
+fn comments(zip: &Zip<'_>, part: &str) -> Vec<(String, String)> {
+    let Ok(Some(text)) = zip.text(part) else { return Vec::new() };
+    let Ok(d) = xml::parse(&text) else { return Vec::new() };
+    let Some(list) = child(d.root_element(), "commentList") else { return Vec::new() };
+    children(list, "comment")
+        .take(65_536)
+        .filter_map(|c| {
+            let at = attr(c, "ref")?.to_owned();
+            let text = child(c, "text").map(|t| string_item(t, &[]).text).unwrap_or_default();
+            Some((at, text))
+        })
+        .collect()
+}
+
+/// Print a sheet's comments on pages after it, as Excel does for "At end of sheet": each as
+/// `Cell:` and `Comment:` lines, a blank line between, in the workbook's default font.
+fn draw_comments(
+    canvas: &mut Canvas,
+    sh: &Sheet,
+    styles: &Styles,
+    notes: &mut Notes,
+    jobs: &mut Vec<HfJob>,
+    sheet_index: usize,
+) -> Result<(), String> {
+    if sh.end_comments.is_empty() {
+        return Ok(());
+    }
+    let style = styles.fonts.first().map_or_else(RunStyle::default, |f| RunStyle { fam: family_of(&f.name), size: f.size, ..RunStyle::default() });
+    let (pw, ph) = if sh.landscape { (sh.paper.1, sh.paper.0) } else { sh.paper };
+    let [mt, mr, mb, ml] = sh.margins;
+    let area_w = (pw - ml - mr).max(72.0);
+    let line_h = {
+        let (a, d, gap) = style.line_metrics();
+        style.size * (a + d + gap)
+    };
+    let mut lines: Vec<String> = Vec::new();
+    for (at, text) in &sh.end_comments {
+        lines.push(format!("Cell: {at}"));
+        for (i, para) in text.split('\n').enumerate() {
+            let para = notes.drawable(if i == 0 { para } else { para.trim_end_matches('\r') });
+            let para = if i == 0 { format!("Comment: {para}") } else { para };
+            lines.extend(pdfcraft_fonts::wrap_with(&para, style.size, area_w, |t, size| RunStyle { size, ..style.clone() }.width(t)));
+        }
+        lines.push(String::new());
+    }
+    let mut page: Option<usize> = None;
+    let mut y = 0.0;
+    for line in lines {
+        if page.is_none() || y - line_h < mb {
+            let pi = canvas.new_page(pw, ph)?;
+            jobs.push(HfJob { page: pi, sheet: sheet_index, first: false });
+            page = Some(pi);
+            y = ph - mt;
+        }
+        y -= line_h;
+        if let Some(p) = page.and_then(|i| canvas.page(i)) {
+            p.text(ml, y + line_h - style.size, &style, &line);
+        }
+    }
+    Ok(())
 }
 
 /// A sheet's page waiting for its header and footer (drawn once the page count is known).
@@ -1085,6 +1881,9 @@ struct HfSheet {
     pictures: Pictures,
     margins: [f64; 4],
     hf_margins: (f64, f64),
+    /// The sheet's own first page number (`useFirstPageNumber`), else numbered through the
+    /// workbook.
+    first_number: Option<usize>,
 }
 
 /// A sheet measured for printing: row heights (grown for wrapped text), wrapped lines, and
@@ -1095,6 +1894,8 @@ struct Grid<'a> {
     heights: Vec<f64>,
     wrapped: HashMap<(u32, u32), Vec<String>>,
     texts: HashMap<(u32, u32), String>,
+    /// Rich text cells' drawable runs with their styles (line breaks kept as `\n`).
+    rich: HashMap<(u32, u32), Vec<(String, RunStyle)>>,
     /// `col_at[c]` is the width of the columns before `c`, `row_at[r]` the height of the rows
     /// before `r`; both go one past the last, for the far edge.
     col_at: Vec<f64>,
@@ -1129,11 +1930,39 @@ impl Grid<'_> {
             bold: f.bold,
             italic: f.italic,
             size: f.size,
-            color: if cell.red { [1.0, 0.0, 0.0] } else { f.color.unwrap_or([0.0; 3]) },
+            color: cell.color.or(f.color).unwrap_or([0.0; 3]),
+            link: cell.link.clone(),
             underline: f.underline,
             strike: f.strike,
             ..RunStyle::default()
         }
+    }
+
+    /// A rich run's style: the cell's, with the run's own font over it.
+    fn rich_style(&self, cell: &Cell, look: Option<&RichLook>) -> RunStyle {
+        let base = self.style_of(cell);
+        let Some(l) = look else { return base };
+        let name = l.name.as_deref();
+        RunStyle {
+            fam: name.map_or(base.fam, family_of),
+            size: l.size.unwrap_or(base.size),
+            color: cell.color.or(l.color).unwrap_or(base.color),
+            bold: l.bold,
+            italic: l.italic,
+            underline: l.underline,
+            strike: l.strike,
+            vert: l.vert,
+            ..base
+        }
+    }
+
+    /// The style a cell's rows are fitted to: its own, or its largest rich run's.
+    fn tallest(&self, at: (u32, u32), cell: &Cell) -> RunStyle {
+        self.rich
+            .get(&at)
+            .and_then(|segs| segs.iter().map(|(_, st)| st).filter(|st| st.vert == 0).max_by(|a, b| a.size.total_cmp(&b.size)))
+            .cloned()
+            .unwrap_or_else(|| self.style_of(cell))
     }
 
     /// A drawing's rectangle on the sheet (x, y from the top-left of A1, width, height).
@@ -1199,7 +2028,7 @@ fn bands(from: u32, to: u32, size: &dyn Fn(u32) -> f64, avail: &dyn Fn(u32) -> f
 }
 
 fn draw_sheet(canvas: &mut Canvas, sh: &Sheet, styles: &Styles, notes: &mut Notes, jobs: &mut Vec<HfJob>, sheet_index: usize) -> Result<(), String> {
-    if sh.cells.is_empty() && sh.drawings.is_empty() {
+    if sh.cells.is_empty() && sh.drawings.is_empty() && sh.sparklines.is_empty() {
         return Ok(());
     }
     let mut max_row = sh.cells.keys().map(|(r, _)| *r).max().unwrap_or(1);
@@ -1209,6 +2038,10 @@ fn draw_sheet(canvas: &mut Canvas, sh: &Sheet, styles: &Styles, notes: &mut Note
         let (r, c) = drawing_extent(sh, &d.anchor);
         max_row = max_row.max(r);
         max_col = max_col.max(c);
+    }
+    for ((r, c), ..) in &sh.sparklines {
+        max_row = max_row.max(*r);
+        max_col = max_col.max(*c);
     }
     let (pw, ph) = if sh.landscape { (sh.paper.1, sh.paper.0) } else { sh.paper };
     let [mt, mr, mb, ml] = sh.margins;
@@ -1220,6 +2053,7 @@ fn draw_sheet(canvas: &mut Canvas, sh: &Sheet, styles: &Styles, notes: &mut Note
         heights: vec![0.0; max_row as usize + 1],
         wrapped: HashMap::new(),
         texts: HashMap::new(),
+        rich: HashMap::new(),
         col_at: Vec::new(),
         row_at: Vec::new(),
     };
@@ -1228,6 +2062,16 @@ fn draw_sheet(canvas: &mut Canvas, sh: &Sheet, styles: &Styles, notes: &mut Note
         // characters, so each line is made drawable on its own.
         let lines: Vec<String> = cell.text.split('\n').map(|line| notes.drawable(line)).collect();
         g.texts.insert((*r, *c), lines.join("\n"));
+        if let Some(runs) = &cell.runs {
+            let segs: Vec<(String, RunStyle)> = runs
+                .iter()
+                .map(|run| {
+                    (run.text.split('\n').map(|line| notes.drawable(line)).collect::<Vec<_>>().join("\n"), g.rich_style(cell, run.look.as_ref()))
+                })
+                .filter(|(t, _)| !t.is_empty())
+                .collect();
+            g.rich.insert((*r, *c), segs);
+        }
     }
     for r in 1..=max_row {
         let h = if sh.hidden_rows.contains(&r) { 0.0 } else { sh.heights.get(&r).map_or(sh.default_h, |(h, _)| *h) };
@@ -1235,31 +2079,71 @@ fn draw_sheet(canvas: &mut Canvas, sh: &Sheet, styles: &Styles, notes: &mut Note
             *slot = h;
         }
     }
-    // Wrapped text makes a row without a custom height taller. A merged range wraps across its
-    // whole width, and Excel never grows rows for it.
+    // Rows without a custom height are fitted again when printing, as Excel does: the tallest of
+    // their cells' fonts (one line, or each wrapped line), in whole pixels, plus 2 px. A merged
+    // range wraps across its whole width, and a row holding wrapped merged text keeps its height.
     let merge_ends: HashMap<(u32, u32), u32> = sh.merges.iter().map(|&(r1, c1, _, c2)| ((r1, c1), c2)).collect();
+    let line_px = |st: &RunStyle| {
+        let (a, d, gap) = st.line_metrics();
+        ((st.size * 4.0 / 3.0).round() * (a + d + gap)).round()
+    };
+    let default_px =
+        line_px(&styles.fonts.first().map_or_else(RunStyle::default, |f| RunStyle { fam: family_of(&f.name), size: f.size, ..RunStyle::default() }))
+            + 2.0;
+    // Row → (fitted pixels, keep the saved height).
+    let mut fit: HashMap<u32, (f64, bool)> = HashMap::new();
     for ((r, c), cell) in &sh.cells {
         let Some(xf) = styles.xfs.get(cell.xf) else { continue };
-        if !xf.wrap || cell.text.is_empty() {
+        let style = g.tallest((*r, *c), cell);
+        let merged_to = merge_ends.get(&(*r, *c)).copied();
+        let mut lines_n = 1usize;
+        // Rotated text needs the height of its slanted line; stacked text one line a character.
+        if xf.rotation != 0 && !cell.text.is_empty() {
+            let text = g.texts.get(&(*r, *c)).cloned().unwrap_or_default().replace('\n', " ");
+            let px = if xf.rotation == 255 {
+                text.chars().count() as f64 * line_px(&style) + 2.0
+            } else {
+                let a = rotation_degrees(xf.rotation).to_radians();
+                ((style.width(&text) * a.sin().abs() + style.size * 1.2 * a.cos().abs()) * 4.0 / 3.0).round() + 4.0
+            };
+            let e = fit.entry(*r).or_insert((0.0, false));
+            e.0 = e.0.max(px);
             continue;
         }
-        let style = g.style_of(cell);
-        let merged_to = merge_ends.get(&(*r, *c)).copied();
-        let w = (merged_to.map_or_else(|| g.width(*c), |c2| (*c..=c2.min(c.saturating_add(16_384))).map(|cc| g.width(cc)).sum()) - 4.0).max(4.0);
-        let text = g.texts.get(&(*r, *c)).cloned().unwrap_or_default();
-        let lines: Vec<String> = text
-            .split('\n')
-            .flat_map(|p| pdfcraft_fonts::wrap_with(p, style.size, w, |s, size| RunStyle { size, ..style.clone() }.width(s)))
-            .collect();
-        let need = lines.len() as f64 * style.size * 1.2 + 3.0;
-        if !sh.heights.get(r).is_some_and(|(_, custom)| *custom)
-            && merged_to.is_none()
-            && let Some(slot) = g.heights.get_mut(*r as usize)
+        if xf.wrap && !cell.text.is_empty() {
+            let w = (merged_to.map_or_else(|| g.width(*c), |c2| (*c..=c2.min(c.saturating_add(16_384))).map(|cc| g.width(cc)).sum()) - 4.0).max(4.0);
+            let text = g.texts.get(&(*r, *c)).cloned().unwrap_or_default();
+            let lines: Vec<String> = text
+                .split('\n')
+                .flat_map(|p| pdfcraft_fonts::wrap_with(p, style.size, w, |s, size| RunStyle { size, ..style.clone() }.width(s)))
+                .collect();
+            lines_n = if merged_to.is_some() { 1 } else { lines.len().max(1) };
+            if merged_to.is_some() {
+                fit.entry(*r).or_insert((0.0, false)).1 = true;
+            }
+            g.wrapped.insert((*r, *c), lines);
+        }
+        let px = lines_n as f64 * line_px(&style) + 2.0;
+        let e = fit.entry(*r).or_insert((0.0, false));
+        e.0 = e.0.max(px);
+    }
+    for (r, (px, keep)) in fit {
+        if keep || sh.heights.get(&r).is_some_and(|(_, custom)| *custom) {
+            continue;
+        }
+        if let Some(slot) = g.heights.get_mut(r as usize)
             && *slot > 0.0
         {
-            *slot = slot.max(need);
+            *slot = px.max(default_px) * 0.75;
         }
-        g.wrapped.insert((*r, *c), lines);
+    }
+    // Excel prints a row of `px` screen pixels as round(px · 247/255 · 6.25) printer dots of a
+    // 600 dpi grid, a little shorter than its nominal height (a 15 pt row prints 14.52 pt).
+    for h in g.heights.iter_mut() {
+        if *h > 0.0 {
+            let px = (*h * 4.0 / 3.0).round();
+            *h = (px * 247.0 / 255.0 * 6.25).round() / 600.0 * 72.0;
+        }
     }
     let running = |n: u32, size: &dyn Fn(u32) -> f64| -> Vec<f64> {
         let mut at = vec![0.0; 2];
@@ -1285,6 +2169,12 @@ fn draw_sheet(canvas: &mut Canvas, sh: &Sheet, styles: &Styles, notes: &mut Note
     let title_rows = sh.title_rows.map(|(a, b)| (a.min(max_row), b.min(max_row)));
     let title_cols = sh.title_cols.map(|(a, b)| (a.min(max_col), b.min(max_col)));
     let no_breaks = BTreeSet::new();
+    // Printed headings: a column of row numbers as wide as the longest one, and a row of column
+    // letters as tall as a default row, in the sheet's default font.
+    let head_font =
+        styles.fonts.first().map_or_else(RunStyle::default, |f| RunStyle { fam: family_of(&f.name), size: f.size, ..RunStyle::default() });
+    let head_w = if sh.headings { head_font.width(&max_row.to_string()) + 8.0 } else { 0.0 };
+    let head_h = if sh.headings { sh.default_h } else { 0.0 };
     let mut first = true;
     let merge_work = std::cell::Cell::new(MAX_MERGE_WORK);
     let merge_cut = std::cell::Cell::new(false);
@@ -1303,8 +2193,8 @@ fn draw_sheet(canvas: &mut Canvas, sh: &Sheet, styles: &Styles, notes: &mut Note
         // Title rows and columns repeat on the pages after them, taking their room there.
         let title_h = title_rows.map_or(0.0, |(a, b)| span_h(a, b));
         let title_w = title_cols.map_or(0.0, |(a, b)| span_w(a, b));
-        let avail_w = |start: u32| area_w / k - if title_cols.is_some_and(|(_, b)| start > b) { title_w } else { 0.0 };
-        let avail_h = |start: u32| area_h / k - if title_rows.is_some_and(|(_, b)| start > b) { title_h } else { 0.0 };
+        let avail_w = |start: u32| area_w / k - head_w - if title_cols.is_some_and(|(_, b)| start > b) { title_w } else { 0.0 };
+        let avail_h = |start: u32| area_h / k - head_h - if title_rows.is_some_and(|(_, b)| start > b) { title_h } else { 0.0 };
         let (rb, cb) = if sh.fit.is_some() { (&no_breaks, &no_breaks) } else { (&sh.row_breaks, &sh.col_breaks) };
         let col_bands = bands(ac1, ac2, &|c| g.width(c), &avail_w, cb);
         let row_bands = bands(ar1, ar2, &|r| g.row_h(r), &avail_h, rb);
@@ -1337,8 +2227,8 @@ fn draw_sheet(canvas: &mut Canvas, sh: &Sheet, styles: &Styles, notes: &mut Note
             let (Some(&(c0, c1)), Some(&(r0, r1))) = (col_bands.get(ci), row_bands.get(ri)) else { continue };
             let row_segs: Vec<(u32, u32)> = title_rows.filter(|(_, b)| r0 > *b).into_iter().chain(std::iter::once((r0, r1))).collect();
             let col_segs: Vec<(u32, u32)> = title_cols.filter(|(_, b)| c0 > *b).into_iter().chain(std::iter::once((c0, c1))).collect();
-            let content_w: f64 = col_segs.iter().map(|(a, b)| span_w(*a, *b)).sum();
-            let content_h: f64 = row_segs.iter().map(|(a, b)| span_h(*a, *b)).sum();
+            let content_w: f64 = head_w + col_segs.iter().map(|(a, b)| span_w(*a, *b)).sum::<f64>();
+            let content_h: f64 = head_h + row_segs.iter().map(|(a, b)| span_h(*a, *b)).sum::<f64>();
             let cx = if sh.h_center { ((area_w - content_w * k) / 2.0).max(0.0) } else { 0.0 };
             let cy = if sh.v_center { ((area_h - content_h * k) / 2.0).max(0.0) } else { 0.0 };
             let pi = canvas.new_page(pw, ph)?;
@@ -1356,9 +2246,12 @@ fn draw_sheet(canvas: &mut Canvas, sh: &Sheet, styles: &Styles, notes: &mut Note
                     super::canvas::n((ph - mt) * (1.0 - k) - cy)
                 ));
             }
-            let mut oy = ph - mt;
+            if sh.headings {
+                draw_headings(page, &g, &head_font, (&row_segs, &col_segs), (ml, ph - mt), (head_w, head_h));
+            }
+            let mut oy = ph - mt - head_h;
             for rs in &row_segs {
-                let mut ox = ml;
+                let mut ox = ml + head_w;
                 for cs in &col_segs {
                     draw_block(page, &g, *rs, *cs, (ox, oy), &merge_work, &merge_cut);
                     // Pictures and shapes in the page's own cells, clipped to them.
@@ -1387,6 +2280,54 @@ fn draw_sheet(canvas: &mut Canvas, sh: &Sheet, styles: &Styles, notes: &mut Note
         notes.add("merged ranges on very dense pages, drawn unmerged");
     }
     Ok(())
+}
+
+/// A run of rows or columns, first and last.
+type Span = (u32, u32);
+
+/// A column's letters (1 is A, 27 is AA).
+fn col_letters(mut c: u32) -> String {
+    let mut out = Vec::new();
+    while c > 0 && out.len() < 4 {
+        let r = (c - 1) % 26;
+        out.push(char::from(b'A' + r as u8));
+        c = (c - 1) / 26;
+    }
+    out.iter().rev().collect()
+}
+
+/// Printed headings for a page whose printable area starts at `(x, y)` (top left): the corner,
+/// the column letters above the columns and the row numbers left of the rows, each centred in a
+/// cell with a grey outline.
+fn draw_headings(page: &mut Page, g: &Grid<'_>, font: &RunStyle, (rows, cols): (&[Span], &[Span]), (x, y): (f64, f64), (hw, hh): (f64, f64)) {
+    const LINE: [f64; 3] = [0.6, 0.6, 0.6];
+    let cell = |page: &mut Page, cx: f64, cy: f64, w: f64, h: f64, text: &str| {
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        page.stroke_rect(cx, cy - h, w, h, 0.25, LINE);
+        if !text.is_empty() {
+            let tw = font.width(text);
+            page.text(cx + (w - tw) / 2.0, cy - h / 2.0 - font.size * 0.3, font, text);
+        }
+    };
+    cell(page, x, y, hw, hh, "");
+    let mut cx = x + hw;
+    for &(a, b) in cols {
+        for c in a..=b.min(a.saturating_add(16_384)) {
+            let w = g.width(c);
+            cell(page, cx, y, w, hh, &col_letters(c));
+            cx += w;
+        }
+    }
+    let mut cy = y - hh;
+    for &(a, b) in rows {
+        for r in a..=b.min(a.saturating_add(1_048_576)) {
+            let h = g.row_h(r);
+            cell(page, x, cy, hw, h, &r.to_string());
+            cy -= h;
+        }
+    }
 }
 
 /// Draw the cells of rows `r0..=r1` and columns `c0..=c1` with their top-left corner at PDF
@@ -1463,7 +2404,10 @@ fn draw_block(
         }
         let Some(xf) = styles.xfs.get(cell.xf) else { continue };
         let look = sh.looks.get(&(*r, *c));
-        let fill = look.and_then(|l| l.fill).or_else(|| styles.fills.get(xf.fill).copied().flatten());
+        let fill = look
+            .and_then(|l| l.fill)
+            .or_else(|| styles.fills.get(xf.fill).copied().flatten())
+            .or_else(|| sh.table_looks.get(&(*r, *c)).and_then(|(t, _)| t.fill));
         if let Some(f) = fill {
             let (x, y, w, h) = rect(*r, *c);
             page.fill_rect(x, y, w, h, f);
@@ -1481,12 +2425,24 @@ fn draw_block(
             }
         }
     }
+    for ((r, c), kind, colour, values) in sh.sparklines.iter().filter(|((r, c), ..)| (r0..=r1).contains(r) && (c0..=c1).contains(c)) {
+        let (x, y, w, h) = rect(*r, *c);
+        draw_sparkline(page, (x + 2.0, y + 2.0, (w - 4.0).max(1.0), (h - 4.0).max(1.0)), *kind, *colour, values);
+    }
     for ((r, c), cell) in &cells_here {
         if covered(*r, *c) || cell.text.is_empty() {
             continue;
         }
         let xf = styles.xfs.get(cell.xf).cloned().unwrap_or_default();
         let mut style = g.style_of(cell);
+        // A formatted table's font colour and bold, where the cell's own font doesn't set them.
+        if let Some((t, _)) = sh.table_looks.get(&(*r, *c)) {
+            let own_color = cell.color.is_some() || styles.fonts.get(xf.font).is_some_and(|f| f.color.is_some());
+            if let (Some(col), false) = (t.color, own_color) {
+                style.color = col;
+            }
+            style.bold |= t.bold;
+        }
         let (mut x, y, mut w, h) = rect(*r, *c);
         if w <= 0.0 || h <= 0.0 {
             continue;
@@ -1509,8 +2465,50 @@ fn draw_block(
             }
         }
         let text = g.texts.get(&(*r, *c)).cloned().unwrap_or_default();
+        // A rich cell's runs, with the conditional format's font changes over each.
+        let segs: Option<Vec<(String, RunStyle)>> = g.rich.get(&(*r, *c)).map(|segs| {
+            segs.iter()
+                .map(|(t, st)| {
+                    let mut st = st.clone();
+                    if let Some(l) = sh.looks.get(&(*r, *c)) {
+                        st.color = l.color.unwrap_or(st.color);
+                        st.bold = l.bold.unwrap_or(st.bold);
+                        st.italic = l.italic.unwrap_or(st.italic);
+                        st.underline = l.underline.unwrap_or(st.underline);
+                        st.strike = l.strike.unwrap_or(st.strike);
+                    }
+                    (t.clone(), st)
+                })
+                .collect()
+        });
+        if let Some(segs) = &segs {
+            style = segs.iter().map(|(_, st)| st).filter(|st| st.vert == 0).max_by(|a, b| a.size.total_cmp(&b.size)).cloned().unwrap_or(style);
+        }
+        if xf.rotation != 0 {
+            let one: Vec<(String, RunStyle)> =
+                segs.unwrap_or_else(|| vec![(text.clone(), style.clone())]).into_iter().map(|(t, st)| (t.replace('\n', " "), st)).collect();
+            draw_turned(page, (x, y, w, h), &xf, cell, &one, &style);
+            continue;
+        }
         let lines = g.wrapped.get(&(*r, *c)).cloned().unwrap_or_else(|| vec![text.replace('\n', " ")]);
-        let line_h = style.size * 1.2;
+        // Shrink to fit: a line too wide for the cell is set small enough to fit.
+        if xf.shrink && !xf.wrap && segs.is_none() {
+            let tw = lines.iter().map(|l| style.width(l)).fold(0.0, f64::max);
+            if tw > w - 4.0 && tw > 0.0 {
+                style.size = (style.size * (w - 4.0) / tw).max(1.0);
+            }
+        }
+        // Each line's runs: the rich runs cut where the line's characters fall, else the cell's style.
+        let line_segs: Vec<Vec<(String, RunStyle)>> = match &segs {
+            Some(segs) => split_rich(segs, &lines),
+            None => lines.iter().map(|l| vec![(l.clone(), style.clone())]).collect(),
+        };
+        let line_h = if lines.len() > 1 {
+            let (a, d, gap) = style.line_metrics();
+            style.size * (a + d + gap)
+        } else {
+            style.size * 1.2
+        };
         let block = lines.len() as f64 * line_h;
         let base_top = match xf.v_align.as_deref() {
             Some("top") => y + h - 1.0,
@@ -1540,7 +2538,8 @@ fn draw_block(
         page.save();
         page.clip_rect(x, y, clip_w, h);
         for (i, l) in lines.iter().enumerate() {
-            let tw = style.width(l);
+            let pieces = line_segs.get(i).cloned().unwrap_or_else(|| vec![(l.clone(), style.clone())]);
+            let tw: f64 = pieces.iter().map(|(t, st)| st.width(t)).sum();
             let indent = xf.indent * 9.0;
             let lx = match align.as_str() {
                 "right" => x + w - 2.0 - tw - indent,
@@ -1548,40 +2547,330 @@ fn draw_block(
                 _ => x + 2.0 + indent,
             };
             let ly = base_top - (i as f64 + 1.0) * line_h + style.size * 0.25;
-            if numeric_overflow(cell, tw, w) {
+            // Fill repeats the text across the cell; justified lines (all but the last) and
+            // distributed ones (every line) spread their words to the cell's width.
+            let last = i + 1 == lines.len();
+            let spread = match align.as_str() {
+                "justify" => !last,
+                "distributed" => true,
+                _ => false,
+            };
+            if line_segs.get(i).is_some_and(|p| p.len() == 1) && !cell.numeric && (align == "fill" || spread) {
+                let room = w - 4.0 - indent;
+                if align == "fill" {
+                    let times = if tw > 0.0 { ((room / tw).floor() as usize).clamp(1, 1_000) } else { 1 };
+                    page.text(x + 2.0 + indent, ly, &style, &l.repeat(times));
+                    continue;
+                }
+                let words: Vec<&str> = l.split(' ').filter(|w| !w.is_empty()).collect();
+                if words.len() > 1 {
+                    let ink: f64 = words.iter().map(|w| style.width(w)).sum();
+                    let gap = ((room - ink) / (words.len() - 1) as f64).max(style.width(" "));
+                    let mut px = x + 2.0 + indent;
+                    for word in words {
+                        page.text(px, ly, &style, word);
+                        px += style.width(word) + gap;
+                    }
+                    continue;
+                }
+                if align == "distributed" {
+                    page.text(x + (w - tw) / 2.0, ly, &style, l);
+                    continue;
+                }
+            }
+            let fitted =
+                cell.value.filter(|_| cell.general && numeric_overflow(cell, tw, w)).and_then(|v| general_fit(v, w - 4.0, &|s| style.width(s)));
+            if let Some(short) = fitted {
+                page.text(x + w - 2.0 - style.width(&short), ly, &style, &short);
+            } else if numeric_overflow(cell, tw, w) {
                 // Excel shows ### when a number doesn't fit its column.
                 let hashes = "#".repeat(((w - 4.0) / style.width("#")).floor().clamp(1.0, 255.0) as usize);
                 page.text(x + 2.0, ly, &style, &hashes);
             } else {
-                page.text(lx, ly, &style, l);
+                let mut px = lx;
+                for (t, st) in &pieces {
+                    page.text(px, ly, st, t);
+                    px += st.width(t);
+                }
             }
         }
         page.restore();
     }
-    for ((r, c), cell) in &cells_here {
+    for ((r, c), _) in &cells_here {
         if covered(*r, *c) {
             continue;
         }
-        let Some(xf) = styles.xfs.get(cell.xf) else { continue };
-        let Some(b) = styles.borders.get(xf.border) else { continue };
+        // A cell's borders: its own, else its formatted table's.
+        let borders_of = |r: u32, c: u32| -> Edges {
+            let own = sh
+                .cells
+                .get(&(r, c))
+                .and_then(|cell| styles.xfs.get(cell.xf))
+                .and_then(|xf| styles.borders.get(xf.border))
+                .copied()
+                .unwrap_or_default();
+            let table = sh.table_looks.get(&(r, c)).map(|(_, e)| *e).unwrap_or_default();
+            Edges {
+                left: own.left.or(table.left),
+                right: own.right.or(table.right),
+                top: own.top.or(table.top),
+                bottom: own.bottom.or(table.bottom),
+                diagonal: own.diagonal,
+            }
+        };
+        let mut b = borders_of(*r, *c);
+        // A merged range's bottom and right edges are its last row's and column's.
+        if let Some((_, _, mr2, mc2)) = merged_at(*r, *c).filter(|(mr1, mc1, ..)| (*mr1, *mc1) == (*r, *c)) {
+            if mr2 > *r {
+                b.bottom = borders_of(mr2, *c).bottom.or(b.bottom);
+            }
+            if mc2 > *c {
+                b.right = borders_of(*r, mc2).right.or(b.right);
+            }
+        }
+        if b.top.is_none() && b.bottom.is_none() && b.left.is_none() && b.right.is_none() && b.diagonal.is_none() {
+            continue;
+        }
         let (x, y, w, h) = rect(*r, *c);
-        if let Some(e) = b.top {
-            page.line(x, y + h, x + w, y + h, e.width, e.color);
-        }
-        if let Some(e) = b.bottom {
-            page.line(x, y, x + w, y, e.width, e.color);
-        }
-        if let Some(e) = b.left {
-            page.line(x, y, x, y + h, e.width, e.color);
-        }
-        if let Some(e) = b.right {
-            page.line(x + w, y, x + w, y + h, e.width, e.color);
+        let mut edge = |e: Option<Edge>, x1: f64, y1: f64, x2: f64, y2: f64| {
+            let Some(e) = e else { return };
+            if e.double {
+                // Two thin lines, one each side of the edge.
+                let (dx, dy) = if (y1 - y2).abs() < 0.01 { (0.0, 0.75) } else { (0.75, 0.0) };
+                page.line(x1 - dx, y1 - dy, x2 - dx, y2 - dy, e.width, e.color);
+                page.line(x1 + dx, y1 + dy, x2 + dx, y2 + dy, e.width, e.color);
+                return;
+            }
+            match e.dash {
+                Some(d) => page.dashed_line(x1, y1, x2, y2, e.width, e.color, d),
+                None => page.line(x1, y1, x2, y2, e.width, e.color),
+            }
+        };
+        edge(b.top, x, y + h, x + w, y + h);
+        edge(b.bottom, x, y, x + w, y);
+        edge(b.left, x, y, x, y + h);
+        edge(b.right, x + w, y, x + w, y + h);
+        if let Some((e, up, down)) = b.diagonal {
+            if up {
+                edge(Some(e), x, y, x + w, y + h);
+            }
+            if down {
+                edge(Some(e), x, y + h, x + w, y);
+            }
         }
     }
 }
 
+/// A sparkline in its cell: a line through the values, a column for each, or win/loss marks
+/// (up for positive, down for negative, all the same height).
+fn draw_sparkline(page: &mut Page, (x, y, w, h): (f64, f64, f64, f64), kind: u8, colour: [f64; 3], values: &[f64]) {
+    let lo = values.iter().copied().fold(f64::INFINITY, f64::min).min(if kind == 1 { 0.0 } else { f64::INFINITY });
+    let hi = values.iter().copied().fold(f64::NEG_INFINITY, f64::max).max(if kind == 1 { 0.0 } else { f64::NEG_INFINITY });
+    let span = (hi - lo).max(1e-9);
+    let yv = |v: f64| y + (v - lo) / span * h;
+    let n = values.len();
+    let step = w / n.max(1) as f64;
+    match kind {
+        0 => {
+            let gap = if n > 1 { w / (n - 1) as f64 } else { 0.0 };
+            let path: String = values
+                .iter()
+                .enumerate()
+                .map(|(i, v)| format!("{} {} {} ", super::canvas::n(x + gap * i as f64), super::canvas::n(yv(*v)), if i == 0 { "m" } else { "l" }))
+                .collect();
+            page.raw(&format!(
+                "q {} {} {} RG 0.75 w 1 j {path}S Q\n",
+                super::canvas::n(colour[0]),
+                super::canvas::n(colour[1]),
+                super::canvas::n(colour[2])
+            ));
+        }
+        1 => {
+            for (i, v) in values.iter().enumerate() {
+                let (a, z) = (yv(0.0f64.clamp(lo, hi)), yv(*v));
+                page.fill_rect(x + step * i as f64 + step * 0.1, a.min(z), step * 0.8, (z - a).abs().max(0.3), colour);
+            }
+        }
+        _ => {
+            for (i, v) in values.iter().enumerate() {
+                let half = h / 2.0;
+                let (by, bh) = if *v >= 0.0 { (y + half, half * 0.9) } else { (y + half * 0.1, half * 0.9) };
+                page.fill_rect(x + step * i as f64 + step * 0.1, by, step * 0.8, bh, if *v >= 0.0 { colour } else { [0.75, 0.0, 0.0] });
+            }
+        }
+    }
+}
+
+/// Degrees counter-clockwise for a `textRotation` (91–180 turn clockwise).
+fn rotation_degrees(rot: u16) -> f64 {
+    if rot <= 90 { f64::from(rot) } else { -f64::from(rot.saturating_sub(90).min(90)) }
+}
+
+/// Cut a rich cell's runs to its wrapped lines: each line's characters are found in the runs in
+/// order (the spaces and breaks wrapping dropped are skipped). A line that can't be matched is
+/// drawn whole in the first run's style.
+fn split_rich(segs: &[(String, RunStyle)], lines: &[String]) -> Vec<Vec<(String, RunStyle)>> {
+    let chars: Vec<(char, usize)> = segs.iter().enumerate().flat_map(|(i, (t, _))| t.chars().map(move |c| (c, i))).collect();
+    let first = segs.first().map(|(_, st)| st.clone()).unwrap_or_default();
+    let mut at = 0usize;
+    let mut out = Vec::with_capacity(lines.len());
+    for line in lines {
+        let want: Vec<char> = line.chars().collect();
+        while at < chars.len() && want.first().is_some_and(|w| chars[at].0 != *w) && matches!(chars[at].0, ' ' | '\n') {
+            at += 1;
+        }
+        let got = chars.get(at..at + want.len());
+        let matched = got.is_some_and(|g| g.iter().zip(&want).all(|((c, _), w)| c == w || (*c == '\n' && *w == ' ')));
+        let Some(got) = got.filter(|_| matched) else {
+            out.push(vec![(line.clone(), first.clone())]);
+            continue;
+        };
+        // Pieces of the line by the run each character came from.
+        let mut pieces: Vec<(String, usize)> = Vec::new();
+        for (c, i) in got {
+            let c = if *c == '\n' { ' ' } else { *c };
+            match pieces.last_mut() {
+                Some((t, run)) if run == i => t.push(c),
+                _ => pieces.push((c.to_string(), *i)),
+            }
+        }
+        at += want.len();
+        out.push(pieces.into_iter().map(|(t, i)| (t, segs.get(i).map(|(_, st)| st.clone()).unwrap_or_default())).collect());
+    }
+    out
+}
+
+/// Draw a cell's rotated (or, at 255, stacked) text, placed in the cell by its alignment.
+fn draw_turned(page: &mut Page, (x, y, w, h): (f64, f64, f64, f64), xf: &Xf, cell: &Cell, segs: &[(String, RunStyle)], style: &RunStyle) {
+    let h_align = xf.h_align.as_deref().filter(|a| *a != "general" && !a.is_empty());
+    let v_align = xf.v_align.as_deref();
+    page.save();
+    page.clip_rect(x, y, w, h);
+    if xf.rotation == 255 {
+        // One character a line, top to bottom, each centred unless the cell says otherwise.
+        let chars: Vec<(char, &RunStyle)> = segs.iter().flat_map(|(t, st)| t.chars().map(move |c| (c, st))).collect();
+        let line_h = style.size * 1.2;
+        let block = chars.len() as f64 * line_h;
+        let top = match v_align {
+            Some("top") => y + h - 1.0,
+            Some("center") => y + (h + block) / 2.0,
+            _ => y + block + 1.0,
+        };
+        for (i, (c, st)) in chars.iter().enumerate() {
+            let s = c.to_string();
+            let cw = st.width(&s);
+            let lx = match h_align {
+                Some("left") => x + 2.0,
+                Some("right") => x + w - 2.0 - cw,
+                _ => x + (w - cw) / 2.0,
+            };
+            page.text(lx, top - (i as f64 + 1.0) * line_h + style.size * 0.25, st, &s);
+        }
+        page.restore();
+        return;
+    }
+    let a = rotation_degrees(xf.rotation).to_radians();
+    let (sin, cos) = a.sin_cos();
+    let tw: f64 = segs.iter().map(|(t, st)| st.width(t)).sum();
+    // The text's box about its baseline origin, turned: where its corners land.
+    let (down, up) = (style.size * 0.25, style.size * 0.95);
+    let corners = [(0.0, -down), (tw, -down), (0.0, up), (tw, up)].map(|(px, py)| (px * cos - py * sin, px * sin + py * cos));
+    let (min_x, max_x) = corners.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), (px, _)| (lo.min(*px), hi.max(*px)));
+    let (min_y, max_y) = corners.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), (_, py)| (lo.min(*py), hi.max(*py)));
+    let (bw, bh) = (max_x - min_x, max_y - min_y);
+    let bx = match h_align.unwrap_or(if cell.numeric { "right" } else { "left" }) {
+        "right" => x + w - 2.0 - bw,
+        "center" | "centerContinuous" => x + (w - bw) / 2.0,
+        _ => x + 2.0,
+    };
+    let by = match v_align {
+        Some("top") => y + h - 1.0 - bh,
+        Some("center") => y + (h - bh) / 2.0,
+        _ => y + 1.0,
+    };
+    page.raw(&format!(
+        "{} {} {} {} {} {} cm\n",
+        super::canvas::n(cos),
+        super::canvas::n(sin),
+        super::canvas::n(-sin),
+        super::canvas::n(cos),
+        super::canvas::n(bx - min_x),
+        super::canvas::n(by - min_y)
+    ));
+    let mut px = 0.0;
+    for (t, st) in segs {
+        page.text(px, 0.0, st, t);
+        px += st.width(t);
+    }
+    page.restore();
+}
+
 fn numeric_overflow(cell: &Cell, text_w: f64, w: f64) -> bool {
     cell.numeric && text_w > w - 2.0 && w > 6.0
+}
+
+/// Print a chart sheet: its chart filling the page inside the margins (landscape unless the
+/// sheet says otherwise). Returns what its header and footer need.
+#[allow(clippy::too_many_arguments)]
+fn chart_sheet(
+    zip: &Zip<'_>,
+    part: &str,
+    book: &Book<'_>,
+    doc: &mut Document,
+    canvas: &mut Canvas,
+    notes: &mut Notes,
+    jobs: &mut Vec<HfJob>,
+    index: usize,
+) -> Option<HfSheet> {
+    let text = zip.text(part).ok()??;
+    let d = xml::parse(&text).ok()?;
+    let root = d.root_element();
+    let setup = child(root, "pageSetup");
+    let paper = match setup.and_then(|p| attr_f64(p, "paperSize")).map(|v| v as i64) {
+        Some(9) => (595.28, 841.89),
+        Some(5) => (612.0, 1008.0),
+        Some(8) => (841.89, 1190.55),
+        Some(11) => (419.53, 595.28),
+        _ => (612.0, 792.0),
+    };
+    let (pw, ph) = if setup.and_then(|p| attr(p, "orientation")) == Some("portrait") { paper } else { (paper.1, paper.0) };
+    let m = child(root, "pageMargins");
+    let g = |k: &str, dflt: f64| m.and_then(|m| attr_f64(m, k)).map_or(dflt, |v| (v * 72.0).clamp(0.0, 300.0));
+    let margins = [g("top", 54.0), g("right", 50.4), g("bottom", 54.0), g("left", 50.4)];
+    let rels = Rels::load(zip, part).ok()?;
+    let drawn = child(root, "drawing")
+        .and_then(|dr| rel_attr(dr, "id"))
+        .and_then(|id| rels.target(id))
+        .map(|t| drawing::read(zip, t, doc, book.theme, notes))
+        .unwrap_or_default();
+    let pi = canvas.new_page(pw, ph).ok()?;
+    let page = canvas.page(pi)?;
+    let [mt, mr, mb, ml] = margins;
+    for dr in &drawn {
+        drawing::draw(page, dr, ml, mb, (pw - ml - mr).max(10.0), (ph - mt - mb).max(10.0));
+    }
+    jobs.push(HfJob { page: pi, sheet: index, first: true });
+    let hf = child(root, "headerFooter").map(|h| {
+        let text = |k: &str| child(h, k).and_then(|c| c.text()).map(str::to_owned);
+        HeaderFooter {
+            odd_header: text("oddHeader"),
+            odd_footer: text("oddFooter"),
+            even_header: text("evenHeader"),
+            even_footer: text("evenFooter"),
+            first_header: text("firstHeader"),
+            first_footer: text("firstFooter"),
+            different_first: flag(attr(h, "differentFirst")) && attr(h, "differentFirst").is_some(),
+            different_odd_even: flag(attr(h, "differentOddEven")) && attr(h, "differentOddEven").is_some(),
+        }
+    });
+    Some(HfSheet {
+        name: String::new(),
+        hf: hf.unwrap_or_default(),
+        pictures: Pictures::new(),
+        margins,
+        hf_margins: (g("header", 21.6), g("footer", 21.6)),
+        first_number: None,
+    })
 }
 
 /// A defined name's ranges (`'Sheet 1'!$A$1:$C$9,'Sheet 1'!$3:$3`) as (first row, first
@@ -1619,13 +2908,41 @@ fn name_ranges(v: &str) -> Vec<(u32, u32, u32, u32)> {
         .collect()
 }
 
-/// Today's date and the time as headers print them (`&D`, `&T`), and as a date serial, in UTC.
+/// The short date and time formats Excel's `&D` and `&T` print in for a locale name
+/// (`LC_ALL`/`LC_TIME`/`LANG`, e.g. `fr_FR.UTF-8`): US English (`10/28/26`, `7:33 PM`) unless
+/// the locale writes day first or year first.
+fn date_formats(locale: &str) -> (&'static str, &'static str) {
+    let l = locale.to_ascii_lowercase().replace('-', "_");
+    let lang = l.split(['_', '.', '@']).next().unwrap_or("");
+    match lang {
+        "" | "c" | "posix" => ("%-m/%-d/%y", "%-I:%M %p"),
+        "en" if l.starts_with("en_us") || l == "en" => ("%-m/%-d/%y", "%-I:%M %p"),
+        "en" => ("%d/%m/%Y", "%H:%M"),
+        "de" | "ru" | "pl" | "cs" | "sk" | "fi" | "nb" | "no" | "da" | "tr" | "uk" | "ro" | "hu" => ("%d.%m.%Y", "%H:%M"),
+        "nl" => ("%d-%m-%Y", "%H:%M"),
+        "ja" | "zh" | "ko" => ("%Y/%m/%d", "%H:%M"),
+        "sv" | "lt" => ("%Y-%m-%d", "%H:%M"),
+        _ => ("%d/%m/%Y", "%H:%M"),
+    }
+}
+
+/// Now as headers print it (`&D`, `&T`), in the computer's time zone and short date format where
+/// they can be read (UTC and US English in the browser), and today as a date serial.
 fn now(date1904: bool) -> (String, String, f64) {
     let secs = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    let t = i64::try_from(secs).ok().and_then(|s| chrono::DateTime::from_timestamp(s, 0)).unwrap_or_default();
+    let utc = i64::try_from(secs).ok().and_then(|s| chrono::DateTime::from_timestamp(s, 0)).unwrap_or_default();
+    #[cfg(not(target_arch = "wasm32"))]
+    let (local, locale) = (
+        utc.with_timezone(&chrono::Local).naive_local(),
+        ["LC_ALL", "LC_TIME", "LANG"].iter().find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty())).unwrap_or_default(),
+    );
+    #[cfg(target_arch = "wasm32")]
+    let (local, locale) = (utc.naive_utc(), String::new());
+    let (date_fmt, time_fmt) = date_formats(&locale);
     // Serial 25 569 is 1970-01-01 in the 1900 system; the 1904 system counts 1 462 days fewer.
-    let serial = secs as f64 / 86_400.0 + 25_569.0 - if date1904 { 1_462.0 } else { 0.0 };
-    (t.format("%Y-%m-%d").to_string(), t.format("%-I:%M %p").to_string(), serial)
+    let local_secs = local.and_utc().timestamp() as f64;
+    let serial = local_secs / 86_400.0 + 25_569.0 - if date1904 { 1_462.0 } else { 0.0 };
+    (local.format(date_fmt).to_string(), local.format(time_fmt).to_string(), serial)
 }
 
 pub(crate) fn convert(zip: &Zip<'_>, main: &str, name: &str, doc: &mut Document, notes: &mut Notes) -> Result<usize, String> {
@@ -1636,9 +2953,10 @@ pub(crate) fn convert(zip: &Zip<'_>, main: &str, name: &str, doc: &mut Document,
     let date1904 = child(root, "workbookPr").is_some_and(|p| flag(attr(p, "date1904")) && attr(p, "date1904").is_some());
     let theme = theme_colors(zip, &rels);
     let styles = load_styles(zip, &rels, &theme, notes)?;
-    let shared = shared_strings(zip, &rels)?;
+    let shared = shared_strings(zip, &rels, &theme)?;
     let (date, time, today) = now(date1904);
-    let book = Book { shared: &shared, styles: &styles, theme: &theme, date1904, today };
+    let mac = zip.text("docProps/app.xml").ok().flatten().is_some_and(|t| t.contains("Macintosh"));
+    let book = Book { shared: &shared, styles: &styles, theme: &theme, date1904, today, mdw: if mac { 8.0 } else { 7.0 } };
     // Print areas and titles are names local to a sheet, by its position in the workbook.
     let mut areas: HashMap<usize, Vec<(u32, u32, u32, u32)>> = HashMap::new();
     let mut titles: HashMap<usize, Vec<(u32, u32, u32, u32)>> = HashMap::new();
@@ -1665,10 +2983,16 @@ pub(crate) fn convert(zip: &Zip<'_>, main: &str, name: &str, doc: &mut Document,
         }
         let Some(id) = rel_attr(s, "id") else { continue };
         let Some(part) = rels.target(id) else { continue };
-        // Chart sheets, dialog sheets and macro sheets (xlMacrosheet) are relationships of their
-        // own types; only worksheets are printed.
+        // Chart sheets print their chart on a page of its own; dialog sheets and macro sheets
+        // (xlMacrosheet) are relationships of their own types and are not printed.
+        if rels.type_of(id) == Some("chartsheet") {
+            if let Some(hf) = chart_sheet(zip, part, &book, doc, &mut canvas, notes, &mut jobs, hf_sheets.len()) {
+                hf_sheets.push(HfSheet { name: attr(s, "name").unwrap_or_default().to_owned(), ..hf });
+            }
+            continue;
+        }
         if rels.type_of(id) != Some("worksheet") {
-            notes.add("chart sheets and macro sheets, left out");
+            notes.add("dialog and macro sheets, left out");
             continue;
         }
         let mut sheet = read_sheet(zip, part, &book, doc, notes)?;
@@ -1681,21 +3005,36 @@ pub(crate) fn convert(zip: &Zip<'_>, main: &str, name: &str, doc: &mut Document,
             }
         }
         draw_sheet(&mut canvas, &sheet, &styles, notes, &mut jobs, hf_sheets.len())?;
+        // Links to the sheet go to the top of its first page.
+        if let Some(first) = jobs.iter().filter(|j| j.sheet == hf_sheets.len()).map(|j| j.page).min() {
+            let top = canvas.page(first).map_or(792.0, |p| p.h);
+            canvas.anchors.entry(format!("sheet:{}", attr(s, "name").unwrap_or_default().to_lowercase())).or_insert((first, top));
+        }
+        draw_comments(&mut canvas, &sheet, &styles, notes, &mut jobs, hf_sheets.len())?;
         hf_sheets.push(HfSheet {
             name: attr(s, "name").unwrap_or_default().to_owned(),
             hf: sheet.hf,
             pictures: sheet.hf_pictures,
             margins: sheet.margins,
             hf_margins: sheet.hf_margins,
+            first_number: sheet.first_number,
         });
     }
     // Headers and footers, now that the page count is known: pages are numbered through the
     // workbook, as Excel prints a whole workbook.
     let total = canvas.pages.len();
     let base = styles.fonts.first().map_or_else(RunStyle::default, |f| RunStyle { fam: family_of(&f.name), size: f.size, ..RunStyle::default() });
+    let first_pages: HashMap<usize, usize> = jobs.iter().fold(HashMap::new(), |mut m, j| {
+        let e = m.entry(j.sheet).or_insert(j.page);
+        *e = (*e).min(j.page);
+        m
+    });
     for job in jobs {
         let Some(sh) = hf_sheets.get(job.sheet) else { continue };
-        let number = job.page + 1;
+        let number = match (sh.first_number, first_pages.get(&job.sheet)) {
+            (Some(first), Some(start)) => first.saturating_add(job.page - start),
+            _ => job.page + 1,
+        };
         let (header, footer, suffix) = sh.hf.pick(job.first, number);
         let Some(page) = canvas.page(job.page) else { continue };
         let frame = hf::Frame { w: page.w, h: page.h, left: sh.margins[3], right: sh.margins[1], header: sh.hf_margins.0, footer: sh.hf_margins.1 };
@@ -1712,6 +3051,25 @@ pub(crate) fn convert(zip: &Zip<'_>, main: &str, name: &str, doc: &mut Document,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fractions_conditions_and_narrow_general_numbers() {
+        let f = |v: f64, code: &str| format_number(v, code, false).0;
+        assert_eq!(f(5.25, "# ?/?"), "5 1/4");
+        assert_eq!(f(0.3333, "# ??/??"), " 1/3 ");
+        assert_eq!(f(1.5, "?/?"), "3/2");
+        assert_eq!(f(2.375, "# ?/8"), "2 3/8");
+        assert_eq!(f(-0.5, "# ?/?"), "-1/2");
+        assert_eq!(f(4.0, "# ?/?").trim_end(), "4");
+        assert_eq!(f(150.0, "[>=100]0;0.00"), "150");
+        assert_eq!(f(50.0, "[>=100]0;0.00"), "50.00");
+        assert_eq!(f(-3.0, "[>0]0;[<0]0.0;\"zero\""), "-3.0");
+        assert_eq!(f(0.0, "[>0]0;[<0]0.0;\"zero\""), "zero");
+        let w = |s: &str| s.len() as f64 * 6.0;
+        assert_eq!(general_fit(1.23456789, 29.0, &w).as_deref(), Some("1.23"));
+        assert_eq!(general_fit(123_456_789_012.0, 47.0, &w).as_deref(), Some("1.2E+11"));
+        assert_eq!(general_fit(123_456.0, 12.0, &w), None);
+    }
 
     #[test]
     fn number_formats() {
@@ -1737,6 +3095,27 @@ mod tests {
         assert_eq!(f(45000.5, "\"Hoje é\" h AM/PM"), "Hoje é 12 PM");
         assert_eq!(f(1e20, "General"), "1E+20");
         assert_eq!(f(f64::MAX, "yyyy"), general(f64::MAX));
+    }
+
+    #[test]
+    fn header_dates_follow_the_locale() {
+        assert_eq!(date_formats(""), ("%-m/%-d/%y", "%-I:%M %p"));
+        assert_eq!(date_formats("en_US.UTF-8"), ("%-m/%-d/%y", "%-I:%M %p"));
+        assert_eq!(date_formats("en_GB.UTF-8").0, "%d/%m/%Y");
+        assert_eq!(date_formats("de_DE").0, "%d.%m.%Y");
+        assert_eq!(date_formats("ja_JP.UTF-8").0, "%Y/%m/%d");
+        assert_eq!(date_formats("pt-BR").0, "%d/%m/%Y");
+        let (d, t, serial) = now(false);
+        assert!(!d.is_empty() && !t.is_empty() && serial > 45_000.0);
+    }
+
+    #[test]
+    fn col_letters_count_past_z() {
+        assert_eq!(col_letters(1), "A");
+        assert_eq!(col_letters(26), "Z");
+        assert_eq!(col_letters(27), "AA");
+        assert_eq!(col_letters(16_384), "XFD");
+        assert_eq!(col_letters(0), "");
     }
 
     #[test]

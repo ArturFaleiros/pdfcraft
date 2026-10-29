@@ -11,14 +11,18 @@
 //! SmartArt, WMF and SVG images) is replaced by an outlined box of the same size and counted too.
 
 mod canvas;
+mod chart;
 mod docx;
 mod emf;
 mod flow;
 mod latin;
+mod math;
 mod pptx;
+mod wmf;
 mod xlsx;
 mod xlsx_cf;
 mod xlsx_drawing;
+mod xlsx_formula;
 mod xlsx_hf;
 mod xml;
 pub(crate) mod zip;
@@ -183,6 +187,14 @@ pub(crate) fn family_of(name: &str) -> Fam {
     }
 }
 
+/// Where a link goes: a web or mail address, or a named place in the document (a Word bookmark,
+/// an Excel sheet).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum LinkTarget {
+    Uri(String),
+    Anchor(String),
+}
+
 /// How a run of text looks.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RunStyle {
@@ -199,6 +211,8 @@ pub(crate) struct RunStyle {
     pub vert: i8,
     pub caps: bool,
     pub hidden: bool,
+    /// The link the run is part of: its text becomes a clickable area.
+    pub link: Option<std::sync::Arc<LinkTarget>>,
 }
 
 impl Default for RunStyle {
@@ -215,6 +229,7 @@ impl Default for RunStyle {
             vert: 0,
             caps: false,
             hidden: false,
+            link: None,
         }
     }
 }
@@ -251,6 +266,12 @@ impl RunStyle {
             return face.text_width(s, size);
         }
         face.text_width(&s.chars().map(latin::measured_as).collect::<String>(), size)
+    }
+
+    /// The line's ascent, descent and gap per point of size: the standard faces' (Helvetica's)
+    /// proportions, with the gap above the text as Word lays out lines.
+    pub(crate) fn line_metrics(&self) -> (f64, f64, f64) {
+        (0.905, 0.212, 0.033)
     }
 }
 

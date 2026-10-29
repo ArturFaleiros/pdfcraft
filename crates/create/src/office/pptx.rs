@@ -468,7 +468,7 @@ impl Cx<'_, '_> {
             _ => None,
         };
         if loaded.is_none() {
-            self.notes.add("images in a format the importer can't draw (WMF, SVG…), drawn as empty boxes");
+            self.notes.add("images in a format the importer can't draw (SVG…), drawn as empty boxes");
         }
         self.images.insert(part, loaded);
         loaded
@@ -864,6 +864,7 @@ fn text_body(
                 vert: l.baseline.unwrap_or(0),
                 caps: l.caps.unwrap_or(false),
                 hidden: false,
+                link: None,
             }
         };
         let base = to_run(&style);
@@ -892,7 +893,7 @@ fn text_body(
                 "fld" => {
                     has_text = true;
                     if attr(r, "type") == Some("slidenum") {
-                        items.push(Inline::Field(Field::Page, to_run(&rl)));
+                        items.push(Inline::Field(Field::Page(None), to_run(&rl)));
                     } else {
                         let t = cx.notes.drawable(&xml::text_of(r, "t"));
                         items.push(Inline::Text(t, to_run(&rl)));
@@ -1098,6 +1099,21 @@ fn shapes(
                                 Some(r) => page.image(r, x, ytop - h, w, h),
                                 None => page.placeholder(x, ytop - h, w, h),
                             }
+                        } else if let Some(chart) = uri
+                            .contains("chart")
+                            .then(|| {
+                                data.and_then(|d| d.descendants().find(|n| is(*n, "chart")))
+                                    .and_then(|n| rel_attr(n, "id"))
+                                    .and_then(|id| rels.target(id))
+                            })
+                            .flatten()
+                            .map(str::to_owned)
+                            .and_then(|p| {
+                                let accents: Vec<[f64; 3]> = (1..=6).filter_map(|i| c.scheme.get(&format!("accent{i}")).copied()).collect();
+                                super::chart::read(cx.zip, &p, &accents, cx.notes)
+                            })
+                        {
+                            super::chart::draw(page, &chart, x, ytop - h, w, h);
                         } else {
                             cx.notes.add(if uri.contains("chart") {
                                 "charts, drawn as empty boxes"
@@ -1293,7 +1309,7 @@ fn cell_text(
             };
             base.get_or_insert_with(|| rs.clone());
             if name == "fld" && attr(r, "type") == Some("slidenum") {
-                items.push(Inline::Field(Field::Page, rs));
+                items.push(Inline::Field(Field::Page(None), rs));
             } else {
                 let t = cx.notes.drawable(&xml::text_of(r, "t"));
                 items.push(Inline::Text(t, rs));

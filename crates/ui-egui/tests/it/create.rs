@@ -427,14 +427,13 @@ fn docx_opens_inserts_and_combines_as_pdf_pages() {
     }
 }
 
-/// A Word package written uncompressed (the importer doesn't check CRCs), with an equation: the
-/// importer writes equations as plain text and says so in its report.
-fn docx_with_equation() -> Vec<u8> {
+/// A Word package written uncompressed (the importer doesn't check CRCs), with a table nested in
+/// a table: the importer places the inner table's text in the cell and says so in its report.
+fn docx_with_nested_table() -> Vec<u8> {
     const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
-    const M: &str = "http://schemas.openxmlformats.org/officeDocument/2006/math";
     const REL: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
     let document = format!(
-        r#"<w:document xmlns:w="{W}" xmlns:m="{M}"><w:body><w:p><w:r><w:t>Area</w:t></w:r><m:oMath><m:r><m:t>a=b+c</m:t></m:r></m:oMath></w:p></w:body></w:document>"#
+        r#"<w:document xmlns:w="{W}"><w:body><w:tbl><w:tr><w:tc><w:tbl><w:tr><w:tc><w:p><w:r><w:t>Area</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/></w:tc></w:tr></w:tbl></w:body></w:document>"#
     );
     let rels = format!(
         r#"<Relationships xmlns="{REL}"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#
@@ -474,26 +473,26 @@ fn docx_with_equation() -> Vec<u8> {
 #[test]
 fn create_from_multiple_files_reports_office_approximations() {
     use pdfcraft_ui_egui::FilePurpose;
-    let docx = docx_with_equation();
+    let docx = docx_with_nested_table();
     let mut app = PdfCraftApp::new();
     app.set_option("language", "en").unwrap();
-    app.use_files(FilePurpose::CreateMultiple, vec![("formula.docx".into(), docx.clone()), ("scan.png".into(), png())]);
+    app.use_files(FilePurpose::CreateMultiple, vec![("nested.docx".into(), docx.clone()), ("scan.png".into(), png())]);
     let toast = app.toast.as_ref().map(|(t, _)| t.clone()).unwrap_or_default();
     assert!(toast.starts_with("Created a PDF from 2 files"), "{toast}");
-    assert!(toast.contains("Converted formula.docx. Approximated: equations, written as plain text: 1"), "{toast}");
+    assert!(toast.contains("Converted nested.docx. Approximated: nested tables, their text placed in the cell: 1"), "{toast}");
     let dir = std::env::temp_dir().join(format!("pdfcraft-create-separate-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     app.export_dir_override = Some(dir.to_string_lossy().into_owned());
-    app.use_files(FilePurpose::CreateMultipleSeparate, vec![("formula.docx".into(), docx)]);
+    app.use_files(FilePurpose::CreateMultipleSeparate, vec![("nested.docx".into(), docx)]);
     let toast = app.toast.as_ref().map(|(t, _)| t.clone()).unwrap_or_default();
-    assert!(toast.starts_with("Wrote 1 file to ") && toast.contains("Converted formula.docx. Approximated: equations"), "{toast}");
-    assert!(dir.join("formula.pdf").exists());
+    assert!(toast.starts_with("Wrote 1 file to ") && toast.contains("Converted nested.docx. Approximated: nested tables"), "{toast}");
+    assert!(dir.join("nested.pdf").exists());
     // A file whose PDF can't be written is left out, with no conversion note of its own.
-    let not_a_dir = dir.join("formula.pdf");
+    let not_a_dir = dir.join("nested.pdf");
     app.export_dir_override = Some(not_a_dir.to_string_lossy().into_owned());
-    app.use_files(FilePurpose::CreateMultipleSeparate, vec![("formula.docx".into(), docx_with_equation())]);
+    app.use_files(FilePurpose::CreateMultipleSeparate, vec![("nested.docx".into(), docx_with_nested_table())]);
     let toast = app.toast.as_ref().map(|(t, _)| t.clone()).unwrap_or_default();
-    assert!(toast.starts_with("Left out: formula.pdf") && !toast.contains("Converted formula.docx"), "{toast}");
+    assert!(toast.starts_with("Left out: nested.pdf") && !toast.contains("Converted nested.docx"), "{toast}");
     std::fs::remove_dir_all(&dir).unwrap();
 }

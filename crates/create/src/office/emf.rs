@@ -149,7 +149,7 @@ struct Player<'n> {
     fonts: u16,
 }
 
-const FACES: [Std14; 12] = [
+pub(crate) const FACES: [Std14; 12] = [
     Std14::Helvetica,
     Std14::HelveticaBold,
     Std14::HelveticaOblique,
@@ -164,7 +164,7 @@ const FACES: [Std14; 12] = [
     Std14::CourierBoldOblique,
 ];
 
-fn face_index(f: Std14) -> usize {
+pub(crate) fn face_index(f: Std14) -> usize {
     FACES.iter().position(|x| *x == f).unwrap_or(0)
 }
 
@@ -612,8 +612,9 @@ impl Player<'_> {
 /// Play an EMF picture into a form XObject whose unit square is the picture (so it is placed
 /// like an image). `None` when the bytes are not an EMF or draw nothing.
 pub(crate) fn form(doc: &mut Document, bytes: &[u8], notes: &mut Notes) -> Option<ObjRef> {
+    // The older Windows Metafile format has its own player.
     if !is_emf(bytes) {
-        return None;
+        return super::wmf::form(doc, bytes, notes);
     }
     let rect = |at: usize| -> Option<[f64; 4]> {
         Some([i32_at(bytes, at)?, i32_at(bytes, at + 4)?, i32_at(bytes, at + 8)?, i32_at(bytes, at + 12)?].map(f64::from))
@@ -662,9 +663,15 @@ pub(crate) fn form(doc: &mut Document, bytes: &[u8], notes: &mut Notes) -> Optio
     if p.out.is_empty() {
         return None;
     }
+    Some(form_xobject(doc, size, p.out.as_bytes(), p.fonts))
+}
+
+/// A form XObject `size` points big holding content `ops`, shown in the unit square an image
+/// fills, with the standard faces `fonts` (a mask of [`FACES`]) as `/F{i}`.
+pub(crate) fn form_xobject(doc: &mut Document, size: (f64, f64), ops: &[u8], fonts_used: u16) -> ObjRef {
     let mut fonts = Dict::new();
     for (i, face) in FACES.iter().enumerate() {
-        if p.fonts & (1 << i) != 0 {
+        if fonts_used & (1 << i) != 0 {
             let mut f = Dict::new();
             f.set(b"Type".to_vec(), Object::name("Font"));
             f.set(b"Subtype".to_vec(), Object::name("Type1"));
@@ -687,7 +694,7 @@ pub(crate) fn form(doc: &mut Document, bytes: &[u8], notes: &mut Notes) -> Optio
         Object::Array(vec![Object::Real(1.0 / size.0), Object::Int(0), Object::Int(0), Object::Real(1.0 / size.1), Object::Int(0), Object::Int(0)]),
     );
     d.set(b"Resources".to_vec(), Object::Dict(res));
-    Some(doc.add(Object::Stream(Stream::flate(d, p.out.as_bytes()))))
+    doc.add(Object::Stream(Stream::flate(d, ops)))
 }
 
 #[cfg(test)]

@@ -93,6 +93,11 @@ impl Rels {
         self.0.iter().find(|(i, ..)| i == id).map(|(.., t)| t.as_str())
     }
 
+    /// The address an external relationship points at (a hyperlink's URL).
+    pub(crate) fn external(&self, id: &str) -> Option<&str> {
+        self.0.iter().find(|(i, _, ext, _)| i == id && *ext).map(|(_, t, _, _)| t.as_str())
+    }
+
     /// Whether the id names an external target (a linked, not embedded, resource).
     pub(crate) fn is_external(&self, id: &str) -> bool {
         self.0.iter().any(|(i, _, ext, _)| i == id && *ext)

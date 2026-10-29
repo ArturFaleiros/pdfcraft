@@ -1,12 +1,16 @@
 //! Page content for imported Office documents: text in the standard-14 faces (WinAnsi, plus the
 //! Latin letters of [`super::latin`] through a second encoding of each face), filled and
-//! stroked paths, and image XObjects. Pages are kept until [`Canvas::finish`] so a converter can
-//! go back to a page (headers and footers are drawn once the page count is known).
+//! stroked paths, image XObjects, link areas and bookmarks. Pages are kept until
+//! [`Canvas::finish`] so a converter can go back to a page (headers and footers are drawn once
+//! the page count is known).
 
-use pdfcraft_cos::{Dict, Document, ObjRef, Object, Stream};
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use pdfcraft_cos::{Dict, Document, ObjRef, Object, PdfString, Stream};
 use pdfcraft_fonts::{Std14, literal, win_ansi_byte};
 
-use super::{RunStyle, latin};
+use super::{LinkTarget, RunStyle, latin};
 use crate::CreateError;
 
 /// Most pages one conversion may produce.
@@ -52,6 +56,8 @@ pub(crate) struct Page {
     fonts: u16,
     latin_fonts: u16,
     images: Vec<ObjRef>,
+    /// Clickable areas (left, bottom, right, top) and where each goes.
+    links: Vec<([f64; 4], Arc<LinkTarget>)>,
 }
 
 impl Page {
@@ -72,6 +78,9 @@ impl Page {
             _ => 0.0,
         };
         let w = style.width(s);
+        if let Some(target) = &style.link {
+            self.link(x, y - size * 0.25, x + w, y + size * 0.95, target);
+        }
         if let Some(h) = style.highlight {
             self.fill_rect(x, y - size * 0.22, w, size * 1.12, h);
         }
@@ -108,6 +117,32 @@ impl Page {
         }
     }
 
+    /// Draw `s` beneath everything already on the page (a page colour).
+    pub(crate) fn underlay(&mut self, s: &str) {
+        let mut ops = s.as_bytes().to_vec();
+        ops.extend_from_slice(&self.ops);
+        self.ops = ops;
+    }
+
+    /// A clickable area going to `target`, joined to the last one when it continues it on the
+    /// same line (the words and spaces of one link).
+    pub(crate) fn link(&mut self, x1: f64, y1: f64, x2: f64, y2: f64, target: &Arc<LinkTarget>) {
+        if !(x1.is_finite() && y1.is_finite() && x2.is_finite() && y2.is_finite()) || self.links.len() >= MAX_LINKS {
+            return;
+        }
+        if let Some((r, t)) = self.links.last_mut()
+            && **t == **target
+            && (r[1] - y1).abs() < 1.0
+            && x1 >= r[0] - 0.5
+            && x1 <= r[2] + (y2 - y1) * 0.5
+        {
+            r[2] = r[2].max(x2);
+            r[3] = r[3].max(y2);
+            return;
+        }
+        self.links.push(([x1, y1, x2, y2], target.clone()));
+    }
+
     /// One `Tj` of `bytes` in face `face`, WinAnsi or (`extra`) the extra Latin encoding.
     fn show(&mut self, face: usize, extra: bool, size: f64, bytes: &[u8]) {
         let prefix = if extra {
@@ -135,6 +170,12 @@ impl Page {
 
     pub(crate) fn line(&mut self, x1: f64, y1: f64, x2: f64, y2: f64, width: f64, c: [f64; 3]) {
         self.push(&format!("{} RG {} w 0 J {} {} m {} {} l S\n", rgb(c), n(width.max(0.1)), n(x1), n(y1), n(x2), n(y2)));
+    }
+
+    /// A dashed line, `dash` being the PDF dash array (`[3 1.5]`).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn dashed_line(&mut self, x1: f64, y1: f64, x2: f64, y2: f64, width: f64, c: [f64; 3], dash: &str) {
+        self.push(&format!("q {} RG {} w 0 J {dash} 0 d {} {} m {} {} l S Q\n", rgb(c), n(width.max(0.1)), n(x1), n(y1), n(x2), n(y2)));
     }
 
     /// An image XObject filling `(x, y, w, h)`.
@@ -180,7 +221,15 @@ impl Page {
 #[derive(Default)]
 pub(crate) struct Canvas {
     pub pages: Vec<Page>,
+    /// Named places links can go to: page and the PDF y of their top.
+    pub anchors: HashMap<String, (usize, f64)>,
+    /// Bookmarks in order: level (0 at the top), title, page and y.
+    pub outline: Vec<(u8, String, usize, f64)>,
 }
+
+/// Most clickable areas on one page, and bookmarks in one document.
+const MAX_LINKS: usize = 10_000;
+const MAX_OUTLINE: usize = 20_000;
 
 /// A page side in points: at least an inch, at most PDF's 200 inches, Letter if not a number.
 fn side(v: f64) -> f64 {
@@ -193,7 +242,7 @@ impl Canvas {
         if self.pages.len() >= MAX_PAGES {
             return Err(format!("the document needs more than {MAX_PAGES} pages"));
         }
-        self.pages.push(Page { w: side(w), h: side(h), ops: Vec::new(), fonts: 0, latin_fonts: 0, images: Vec::new() });
+        self.pages.push(Page { w: side(w), h: side(h), ops: Vec::new(), fonts: 0, latin_fonts: 0, images: Vec::new(), links: Vec::new() });
         Ok(self.pages.len() - 1)
     }
 
@@ -212,14 +261,17 @@ impl Canvas {
     /// Write every page into `doc`. A document always gets at least one page.
     pub(crate) fn finish(mut self, doc: &mut Document) -> Result<usize, CreateError> {
         if self.pages.is_empty() {
-            self.pages.push(Page { w: 612.0, h: 792.0, ops: Vec::new(), fonts: 0, latin_fonts: 0, images: Vec::new() });
+            self.pages.push(Page { w: 612.0, h: 792.0, ops: Vec::new(), fonts: 0, latin_fonts: 0, images: Vec::new(), links: Vec::new() });
         }
         let mut fonts: [Option<ObjRef>; 12] = [None; 12];
         let mut latin_fonts: [Option<ObjRef>; 12] = [None; 12];
         // One encoding and one ToUnicode map serve every face.
         let mut latin_shared: Option<(ObjRef, ObjRef)> = None;
         let count = self.pages.len();
-        for page in self.pages {
+        let mut refs: Vec<ObjRef> = Vec::with_capacity(count);
+        let mut links: Vec<Vec<([f64; 4], Arc<LinkTarget>)>> = Vec::with_capacity(count);
+        for mut page in self.pages {
+            links.push(std::mem::take(&mut page.links));
             let mut font_dict = Dict::new();
             for (i, face) in FACES.iter().enumerate() {
                 if page.fonts & (1 << i) == 0 {
@@ -270,10 +322,115 @@ impl Canvas {
                 }
                 res.set(b"XObject".to_vec(), Object::Dict(xo));
             }
-            crate::add_page(doc, page.w, page.h, res, Some(page.ops))?;
+            refs.push(crate::add_page(doc, page.w, page.h, res, Some(page.ops))?);
         }
+        let dest = |page: usize, y: f64| -> Option<Object> {
+            let r = refs.get(page)?;
+            Some(Object::Array(vec![Object::Ref(*r), Object::name("XYZ"), Object::Null, Object::Real(y), Object::Null]))
+        };
+        for (pi, page_links) in links.iter().enumerate() {
+            let mut annots = Vec::new();
+            for (rect, target) in page_links {
+                let mut a = Dict::new();
+                a.set(b"Type".to_vec(), Object::name("Annot"));
+                a.set(b"Subtype".to_vec(), Object::name("Link"));
+                a.set(b"Rect".to_vec(), Object::Array(rect.iter().map(|v| Object::Real(*v)).collect()));
+                a.set(b"Border".to_vec(), Object::Array(vec![0.into(), 0.into(), 0.into()]));
+                match &**target {
+                    LinkTarget::Uri(uri) if safe_uri(uri) => {
+                        let mut action = Dict::new();
+                        action.set(b"S".to_vec(), Object::name("URI"));
+                        action.set(b"URI".to_vec(), Object::String(PdfString::literal(uri.trim().as_bytes().to_vec())));
+                        a.set(b"A".to_vec(), Object::Dict(action));
+                    }
+                    LinkTarget::Anchor(name) => match self.anchors.get(name).and_then(|(p, y)| dest(*p, *y)) {
+                        Some(d) => a.set(b"Dest".to_vec(), d),
+                        None => continue,
+                    },
+                    LinkTarget::Uri(_) => continue,
+                }
+                annots.push(Object::Ref(doc.add(a)));
+            }
+            if let (false, Some(r)) = (annots.is_empty(), refs.get(pi)) {
+                let _ = doc.update_dict(*r, |d| d.set(b"Annots".to_vec(), Object::Array(annots)));
+            }
+        }
+        write_outline(doc, &self.outline, &dest);
         Ok(count)
     }
+}
+
+/// Only web, mail and FTP addresses become link actions: not scripts or local programs.
+fn safe_uri(uri: &str) -> bool {
+    let lower = uri.trim().to_ascii_lowercase();
+    ["http://", "https://", "mailto:", "ftp://"].iter().any(|p| lower.starts_with(p)) && uri.len() <= 4096 && !uri.chars().any(char::is_control)
+}
+
+/// The document outline (bookmarks) from `items` (level, title, page, y), nested by level.
+fn write_outline(doc: &mut Document, items: &[(u8, String, usize, f64)], dest: &dyn Fn(usize, f64) -> Option<Object>) {
+    let items: Vec<&(u8, String, usize, f64)> =
+        items.iter().filter(|(_, t, p, y)| !t.trim().is_empty() && dest(*p, *y).is_some()).take(MAX_OUTLINE).collect();
+    if items.is_empty() {
+        return;
+    }
+    let Some(catalog) = doc.root() else { return };
+    let root = doc.add(Dict::new());
+    let refs: Vec<ObjRef> = items.iter().map(|_| doc.add(Dict::new())).collect();
+    // Each item's parent: the nearest earlier item of a lower level, else the root.
+    let mut parent: Vec<Option<usize>> = Vec::with_capacity(items.len());
+    let mut stack: Vec<usize> = Vec::new();
+    for (i, (level, ..)) in items.iter().enumerate() {
+        while stack.last().is_some_and(|&j| items[j].0 >= *level) {
+            stack.pop();
+        }
+        parent.push(stack.last().copied());
+        stack.push(i);
+    }
+    let kids = |p: Option<usize>| -> Vec<usize> { (0..items.len()).filter(|i| parent[*i] == p).collect() };
+    let link = |doc: &mut Document, list: &[usize], up: ObjRef| {
+        for (k, &i) in list.iter().enumerate() {
+            let (_, title, page, y) = items[i];
+            let mut d = Dict::new();
+            let title: String = title.trim().chars().take(512).collect();
+            d.set(b"Title".to_vec(), PdfString::text(&title));
+            d.set(b"Parent".to_vec(), Object::Ref(up));
+            if let Some(dst) = dest(*page, *y) {
+                d.set(b"Dest".to_vec(), dst);
+            }
+            if k > 0 {
+                d.set(b"Prev".to_vec(), Object::Ref(refs[list[k - 1]]));
+            }
+            if let Some(&next) = list.get(k + 1) {
+                d.set(b"Next".to_vec(), Object::Ref(refs[next]));
+            }
+            let _ = doc.update_dict(refs[i], |slot| *slot = d);
+        }
+    };
+    let top = kids(None);
+    link(doc, &top, root);
+    for i in 0..items.len() {
+        let mine = kids(Some(i));
+        if mine.is_empty() {
+            continue;
+        }
+        link(doc, &mine, refs[i]);
+        let (first, last) = (refs[mine[0]], refs[mine[mine.len() - 1]]);
+        // Open, showing its whole subtree.
+        let under = (i + 1..items.len()).take_while(|j| items[*j].0 > items[i].0).count();
+        let _ = doc.update_dict(refs[i], |d| {
+            d.set(b"First".to_vec(), Object::Ref(first));
+            d.set(b"Last".to_vec(), Object::Ref(last));
+            d.set(b"Count".to_vec(), Object::Int(under as i64));
+        });
+    }
+    let (first, last) = (refs[top[0]], refs[top[top.len() - 1]]);
+    let _ = doc.update_dict(root, |d| {
+        d.set(b"Type".to_vec(), Object::name("Outlines"));
+        d.set(b"First".to_vec(), Object::Ref(first));
+        d.set(b"Last".to_vec(), Object::Ref(last));
+        d.set(b"Count".to_vec(), Object::Int(items.len() as i64));
+    });
+    let _ = doc.update_dict(catalog, |d| d.set(b"Outlines".to_vec(), Object::Ref(root)));
 }
 
 /// The extra Latin encoding (`/Differences` naming [`latin::LETTERS`] from

@@ -3,22 +3,32 @@
 //! and drawn. Measurements use the standard-14 metrics the text is drawn with, so what is measured
 //! is what is drawn.
 
+use std::sync::Arc;
+
 use pdfcraft_cos::ObjRef;
 
+use super::chart::{self, Chart};
+
 use super::RunStyle;
-use super::canvas::Page;
+use super::canvas::{Page, n};
 
 /// Default tab stops every half inch, as Word and PowerPoint use.
 const DEFAULT_TAB: f64 = 36.0;
 /// Most lines one paragraph may lay out to.
 const MAX_LINES: usize = 50_000;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Field {
-    /// The current page (or slide) number.
-    Page,
+    /// The current page (or slide) number, in a numbering format (`lowerRoman`…) when the field
+    /// names one (`\* roman`).
+    Page(Option<&'static str>),
     /// The number of pages.
     Pages,
+    /// The number of pages in the section (the number of pages where sections aren't known).
+    SectionPages,
+    /// The text of the nearest paragraph in a style (`STYLEREF`, by style id): resolved for each
+    /// page before headers are laid out, empty elsewhere.
+    StyleRef(Arc<str>),
 }
 
 #[derive(Clone, Debug)]
@@ -29,6 +39,14 @@ pub(crate) enum Inline {
     Break,
     /// An image of `w × h` points; `None` draws a placeholder box.
     Image(Option<ObjRef>, f64, f64),
+    /// A cropped image of `w × h` points (see [`Pic::Cropped`]).
+    Cropped(ObjRef, [f64; 4], f64, f64),
+    /// A chart of `w × h` points.
+    Chart(Arc<Chart>, f64, f64),
+    /// Shapes, text boxes and pictures drawn together (a shape, a group or a drawing canvas).
+    Shapes(Arc<Vec<ShapePart>>, f64, f64),
+    /// An equation, sitting on the line's baseline.
+    Math(Arc<super::math::MathBox>),
     Field(Field, RunStyle),
 }
 
@@ -64,6 +82,73 @@ pub(crate) struct Rule {
     pub color: [f64; 3],
     pub space: f64,
     pub double: bool,
+    pub dash: LineStyle,
+}
+
+/// How a border line is drawn.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) enum LineStyle {
+    #[default]
+    Solid,
+    Dotted,
+    Dashed,
+    DashDot,
+    DashDotDot,
+    Wave,
+}
+
+impl LineStyle {
+    /// A Word border style's (`w:val`) dashes.
+    pub(crate) fn of(val: &str) -> LineStyle {
+        match val {
+            "dotted" => LineStyle::Dotted,
+            "dashed" | "dashSmallGap" => LineStyle::Dashed,
+            "dotDash" | "dashDotStroked" => LineStyle::DashDot,
+            "dotDotDash" => LineStyle::DashDotDot,
+            "wave" | "doubleWave" => LineStyle::Wave,
+            _ => LineStyle::Solid,
+        }
+    }
+}
+
+/// Stroke a border line in its dash style: dashes in proportion to its width, a wave as a
+/// zigzag of small curves along it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn stroke(page: &mut Page, x1: f64, y1: f64, x2: f64, y2: f64, width: f64, color: [f64; 3], dash: LineStyle) {
+    let w = width.max(0.25);
+    let pattern = match dash {
+        LineStyle::Solid => return page.line(x1, y1, x2, y2, width, color),
+        LineStyle::Dotted => format!("[{} {}]", n(w), n(w * 2.0)),
+        LineStyle::Dashed => format!("[{} {}]", n(w * 6.0), n(w * 3.0)),
+        LineStyle::DashDot => format!("[{} {} {} {}]", n(w * 6.0), n(w * 2.0), n(w), n(w * 2.0)),
+        LineStyle::DashDotDot => format!("[{} {} {} {} {} {}]", n(w * 6.0), n(w * 2.0), n(w), n(w * 2.0), n(w), n(w * 2.0)),
+        LineStyle::Wave => {
+            let len = (x2 - x1).hypot(y2 - y1);
+            if !len.is_finite() || len < 0.1 {
+                return;
+            }
+            // Unit vectors along and across the line.
+            let (ux, uy) = ((x2 - x1) / len, (y2 - y1) / len);
+            let (vx, vy) = (-uy, ux);
+            let step = (w * 3.0).max(1.5);
+            let amp = (w * 1.5).max(0.75);
+            let mut path = format!("q {} {} {} RG {} w {} {} m ", n(color[0]), n(color[1]), n(color[2]), n(w), n(x1), n(y1));
+            let mut at = 0.0;
+            let mut up = 1.0;
+            while at < len && path.len() < 1 << 20 {
+                let next = (at + step).min(len);
+                let mid = (at + next) / 2.0;
+                let (cx, cy) = (x1 + ux * mid + vx * amp * up, y1 + uy * mid + vy * amp * up);
+                let (ex, ey) = (x1 + ux * next, y1 + uy * next);
+                path.push_str(&format!("{} {} {} {} {} {} c ", n(cx), n(cy), n(cx), n(cy), n(ex), n(ey)));
+                at = next;
+                up = -up;
+            }
+            path.push_str("S Q\n");
+            return page.raw(&path);
+        }
+    };
+    page.dashed_line(x1, y1, x2, y2, width, color, &pattern);
 }
 
 /// A paragraph's borders. Consecutive paragraphs with the same borders share one box, with
@@ -119,6 +204,64 @@ pub(crate) struct Para {
     pub keep_next: bool,
     /// With contextual spacing, the style whose neighbours' spacing between them is dropped.
     pub contextual: Option<String>,
+    /// Footnotes the paragraph references (by the converter's numbering), each with the item
+    /// of its reference mark: a note goes at the foot of the page its mark's line is placed on.
+    pub notes: Vec<(usize, usize)>,
+    /// Pictures and charts anchored to the paragraph rather than set in its lines.
+    pub floats: Vec<Floating>,
+    /// The paragraph style's id, for style references.
+    pub style: Option<Arc<str>>,
+    /// Widow and orphan control: a paragraph's first or last line is not left alone on a page.
+    pub widow: bool,
+    /// Keep the paragraph's lines on one page.
+    pub keep_lines: bool,
+    /// Left out of line numbering.
+    pub no_line_numbers: bool,
+    /// A drop cap (`w:framePr w:dropCap`): in the margin (`true`) or dropped into the text, and
+    /// how many lines it spans. It floats beside the paragraph after it.
+    pub drop_cap: Option<(bool, u8, f64)>,
+    /// A heading's outline level (0 at the top): it becomes a bookmark.
+    pub outline: Option<u8>,
+    /// Bookmarks (named places) that start in the paragraph, for links to go to.
+    pub anchors: Vec<String>,
+    /// A right-to-left paragraph: its lines read from the right, the first words on the first
+    /// line (right-to-left runs already in visual order).
+    pub rtl: bool,
+}
+
+/// How text goes around a floating picture.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Wrap {
+    /// In front of or behind the text: it takes no room.
+    None,
+    /// Text above and below it only.
+    TopBottom,
+    /// Text beside it.
+    Square,
+}
+
+/// Where a floating picture's edge is: aligned (0 start, 0.5 centre, 1 end) or at an offset in
+/// points, within the text area (or column) or the whole page.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Place {
+    Align(f64, bool),
+    Offset(f64, bool),
+}
+
+/// A picture or chart anchored to a paragraph (`wp:anchor`).
+#[derive(Clone, Debug)]
+pub(crate) struct Floating {
+    pub pic: Pic,
+    pub w: f64,
+    pub h: f64,
+    pub x: Place,
+    /// Down from the paragraph's top (`None`), or `Some(place)` on the page.
+    pub y: Option<Place>,
+    pub y_offset: f64,
+    pub wrap: Wrap,
+    /// The distance text keeps from it at its sides, and below it.
+    pub gap: f64,
+    pub gap_below: f64,
 }
 
 impl Default for Para {
@@ -140,14 +283,56 @@ impl Default for Para {
             borders: None,
             keep_next: false,
             contextual: None,
+            notes: Vec::new(),
+            floats: Vec::new(),
+            style: None,
+            widow: true,
+            keep_lines: false,
+            no_line_numbers: false,
+            drop_cap: None,
+            outline: None,
+            anchors: Vec::new(),
+            rtl: false,
         }
     }
+}
+
+/// What a picture-like item shows.
+#[derive(Clone, Debug)]
+pub(crate) enum Pic {
+    /// An image XObject, or `None` for a placeholder box.
+    Image(Option<ObjRef>),
+    /// An image cropped by fractions of its size (left, top, right, bottom; negative pads).
+    Cropped(ObjRef, [f64; 4]),
+    Chart(Arc<Chart>),
+    Shapes(Arc<Vec<ShapePart>>),
+    Math(Arc<super::math::MathBox>),
+}
+
+/// One shape of a drawing: where it is in the drawing (left, top, width, height as fractions of
+/// the drawing's size), its outline and fill, a picture, and the paragraphs of its text box.
+#[derive(Clone, Debug)]
+pub(crate) struct ShapePart {
+    pub rect: [f64; 4],
+    pub geom: Option<super::xlsx_drawing::Shape>,
+    pub image: Option<Option<ObjRef>>,
+    pub paras: Vec<Para>,
+    /// Text insets (left, top, right, bottom) in points, and where the text sits: 0 top,
+    /// 0.5 middle, 1 bottom.
+    pub inset: [f64; 4],
+    pub anchor: f64,
+    /// Clockwise rotation in degrees.
+    pub rot: f64,
+    /// The text is the shape's own DrawingML text (SmartArt), not paragraphs.
+    pub own_text: bool,
+    /// Vertical text: turned a quarter clockwise (-1, top to bottom) or anticlockwise (1).
+    pub vert: i8,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) enum Placed {
     Text(String, usize),
-    Image(Option<ObjRef>, f64, f64),
+    Image(Pic, f64, f64),
 }
 
 #[derive(Clone, Debug)]
@@ -157,6 +342,9 @@ pub(crate) struct Line {
     pub height: f64,
     /// From the line's top to its baseline.
     pub baseline: f64,
+    /// Where the line's text starts in the paragraph: item and character. A paragraph that
+    /// moves to a column of another width is laid out again from there ([`rest`]).
+    pub src: Option<(usize, usize)>,
 }
 
 /// A laid-out paragraph.
@@ -167,7 +355,6 @@ pub(crate) struct Laid {
     pub before: f64,
     pub after: f64,
     pub shade: Option<[f64; 3]>,
-    pub page_break_before: bool,
     pub left: f64,
     pub right: f64,
 }
@@ -184,7 +371,7 @@ enum Atom {
     /// A tab, with the style of the text before it (for its leader).
     Tab(usize),
     Break,
-    Image(Option<ObjRef>, f64, f64),
+    Image(Pic, f64, f64),
 }
 
 fn style_index(styles: &mut Vec<RunStyle>, s: &RunStyle) -> usize {
@@ -207,12 +394,16 @@ pub(crate) fn fin(v: f64, or: f64) -> f64 {
 
 /// Append text to the atoms; `open` says whether the last atom is a word the text may continue
 /// (no space between, even across runs of different styles).
-fn push_text(out: &mut Vec<Atom>, open: &mut bool, text: &str, si: usize) {
-    for c in text.chars() {
+/// `srcs` gets, for each new atom, where it starts: item `item`, character of its text.
+fn push_text(out: &mut Vec<Atom>, srcs: &mut Vec<(usize, usize)>, open: &mut bool, text: &str, si: usize, item: usize) {
+    for (k, c) in text.chars().enumerate() {
         if c == ' ' {
             match out.last_mut() {
                 Some(Atom::Space(s, _)) => s.push(' '),
-                _ => out.push(Atom::Space(" ".into(), si)),
+                _ => {
+                    out.push(Atom::Space(" ".into(), si));
+                    srcs.push((item, k));
+                }
             }
             *open = false;
             continue;
@@ -224,18 +415,21 @@ fn push_text(out: &mut Vec<Atom>, open: &mut bool, text: &str, si: usize) {
             }
         } else {
             out.push(Atom::Word(vec![(c.to_string(), si)]));
+            srcs.push((item, k));
         }
         // A line may break after a hyphen or slash.
         *open = !matches!(c, '-' | '/');
     }
 }
 
-fn atoms(p: &Para, fields: (usize, usize), styles: &mut Vec<RunStyle>) -> Vec<Atom> {
+/// The paragraph's atoms and where each starts (see [`push_text`]).
+fn atoms(p: &Para, fields: (usize, usize), styles: &mut Vec<RunStyle>) -> (Vec<Atom>, Vec<(usize, usize)>) {
     let mut out: Vec<Atom> = Vec::new();
+    let mut srcs: Vec<(usize, usize)> = Vec::new();
     let mut open = false;
     // The style of the latest text, which a following tab's leader is drawn in.
     let mut last = 0usize;
-    for item in &p.items {
+    for (ii, item) in p.items.iter().enumerate() {
         match item {
             Inline::Text(t, s) => {
                 if s.hidden || t.is_empty() {
@@ -244,31 +438,142 @@ fn atoms(p: &Para, fields: (usize, usize), styles: &mut Vec<RunStyle>) -> Vec<At
                 let si = style_index(styles, s);
                 last = si;
                 let t = if s.caps { t.to_uppercase() } else { t.clone() };
-                push_text(&mut out, &mut open, &t, si);
+                push_text(&mut out, &mut srcs, &mut open, &t, si, ii);
             }
             Inline::Field(f, s) => {
                 let si = style_index(styles, s);
                 let v = match f {
-                    Field::Page => fields.0,
-                    Field::Pages => fields.1,
+                    Field::Page(_) => fields.0.to_string(),
+                    Field::Pages | Field::SectionPages => fields.1.to_string(),
+                    Field::StyleRef(_) => String::new(),
                 };
-                push_text(&mut out, &mut open, &v.to_string(), si);
+                push_text(&mut out, &mut srcs, &mut open, &v, si, ii);
             }
             Inline::Tab => {
                 out.push(Atom::Tab(last));
+                srcs.push((ii, 0));
                 open = false;
             }
             Inline::Break => {
                 out.push(Atom::Break);
+                srcs.push((ii, 0));
                 open = false;
             }
             Inline::Image(r, w, h) => {
-                out.push(Atom::Image(*r, fin(*w, 1.0).clamp(1.0, 14_400.0), fin(*h, 1.0).clamp(1.0, 14_400.0)));
+                out.push(Atom::Image(Pic::Image(*r), fin(*w, 1.0).clamp(1.0, 14_400.0), fin(*h, 1.0).clamp(1.0, 14_400.0)));
+                srcs.push((ii, 0));
+                open = false;
+            }
+            Inline::Cropped(r, crop, w, h) => {
+                out.push(Atom::Image(Pic::Cropped(*r, *crop), fin(*w, 1.0).clamp(1.0, 14_400.0), fin(*h, 1.0).clamp(1.0, 14_400.0)));
+                srcs.push((ii, 0));
+                open = false;
+            }
+            Inline::Chart(c, w, h) => {
+                out.push(Atom::Image(Pic::Chart(c.clone()), fin(*w, 1.0).clamp(1.0, 14_400.0), fin(*h, 1.0).clamp(1.0, 14_400.0)));
+                srcs.push((ii, 0));
+                open = false;
+            }
+            Inline::Math(m) => {
+                out.push(Atom::Image(Pic::Math(m.clone()), fin(m.w, 1.0).clamp(1.0, 14_400.0), fin(m.asc + m.desc, 1.0).clamp(1.0, 14_400.0)));
+                srcs.push((ii, 0));
+                open = false;
+            }
+            Inline::Shapes(s, w, h) => {
+                out.push(Atom::Image(Pic::Shapes(s.clone()), fin(*w, 1.0).clamp(1.0, 14_400.0), fin(*h, 1.0).clamp(1.0, 14_400.0)));
+                srcs.push((ii, 0));
                 open = false;
             }
         }
     }
-    out
+    (out, srcs)
+}
+
+/// Whether `c` is right-to-left text: Arabic or Hebrew.
+fn is_rtl(c: char) -> bool {
+    matches!(u32::from(c), 0x0590..=0x05FF | 0x0600..=0x06FF | 0x0750..=0x077F | 0x08A0..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF)
+}
+
+fn rtl_word(a: &Atom) -> bool {
+    matches!(a, Atom::Word(pieces) if pieces.iter().any(|(t, _)| t.chars().any(is_rtl)))
+}
+
+/// Turn each run of right-to-left words (with the spaces between them) of one text item back
+/// into reading order: shaping set it in visual order, last word first.
+fn logical_order(atoms: &mut [Atom], srcs: &mut [(usize, usize)]) {
+    let mut i = 0usize;
+    while i < atoms.len() {
+        if !atoms.get(i).is_some_and(rtl_word) {
+            i += 1;
+            continue;
+        }
+        let item = srcs.get(i).map(|s| s.0);
+        let (mut end, mut j) = (i, i + 1);
+        while let Some(a) = atoms.get(j) {
+            if srcs.get(j).map(|s| s.0) != item || !(rtl_word(a) || matches!(a, Atom::Space(..))) {
+                break;
+            }
+            if rtl_word(a) {
+                end = j;
+            }
+            j += 1;
+        }
+        if let (Some(run), Some(src)) = (atoms.get_mut(i..=end), srcs.get_mut(i..=end)) {
+            run.reverse();
+            src.reverse();
+        }
+        i = end + 1;
+    }
+}
+
+/// Mirror a laid-out line of a right-to-left paragraph between `left` and `right`, so its
+/// first item is at the right; runs of left-to-right text inside it keep their own order.
+fn mirror_line(items: &mut [(f64, Placed)], styles: &[RunStyle], left: f64, right: f64) {
+    let width = |p: &Placed| match p {
+        Placed::Text(t, si) => styles.get(*si).map_or(0.0, |s| s.width(t)),
+        Placed::Image(_, w, _) => *w,
+    };
+    for (x, p) in items.iter_mut() {
+        *x = left + right - *x - width(p);
+    }
+    // Left-to-right runs: text with letters or digits and none right-to-left, with the spaces
+    // between them, mirrored back within the room they take.
+    let ltr = |p: &Placed| matches!(p, Placed::Text(t, _) if t.chars().any(char::is_alphanumeric) && !t.chars().any(is_rtl));
+    let blank = |p: &Placed| matches!(p, Placed::Text(t, _) if t.trim().is_empty());
+    let mut i = 0usize;
+    while i < items.len() {
+        if !items.get(i).is_some_and(|(_, p)| ltr(p)) {
+            i += 1;
+            continue;
+        }
+        let (mut end, mut j) = (i, i + 1);
+        while let Some((_, p)) = items.get(j) {
+            if ltr(p) {
+                end = j;
+            } else if !blank(p) {
+                break;
+            }
+            j += 1;
+        }
+        if end > i {
+            let lo = items[i..=end].iter().map(|(x, _)| *x).fold(f64::INFINITY, f64::min);
+            let hi = items[i..=end].iter().map(|(x, p)| *x + width(p)).fold(f64::NEG_INFINITY, f64::max);
+            for (x, p) in &mut items[i..=end] {
+                *x = lo + hi - *x - width(p);
+            }
+        }
+        i = end + 1;
+    }
+}
+
+/// What is left of `p` from `src` (item, character) on: a paragraph to lay out again where the
+/// rest of `p` goes on in a column of another width. Its first line is a continuation line.
+pub(crate) fn rest(p: &Para, (item, offset): (usize, usize)) -> Para {
+    let mut items: Vec<Inline> = p.items.iter().skip(item).cloned().collect();
+    if let Some(Inline::Text(t, _)) = items.first_mut() {
+        *t = t.chars().skip(offset).collect();
+    }
+    Para { items, first: 0.0, before: 0.0, label: None, page_break_before: false, ..p.clone() }
 }
 
 struct Building {
@@ -285,6 +590,8 @@ struct Building {
     /// A right, centre or decimal tab whose text is still being placed (from the tab's x on):
     /// it is moved into place when the next tab, a line break or the paragraph's end comes.
     pending: Option<PendingTab>,
+    /// Where the line's first word, tab or picture comes from.
+    src: Option<(usize, usize)>,
 }
 
 struct PendingTab {
@@ -298,7 +605,7 @@ struct PendingTab {
 
 impl Building {
     fn new(start: f64) -> Self {
-        Building { items: Vec::new(), x: start, ink: start, start, spaces: Vec::new(), after_tab: 0, forced: false, pending: None }
+        Building { items: Vec::new(), x: start, ink: start, start, spaces: Vec::new(), after_tab: 0, forced: false, pending: None, src: None }
     }
 
     /// Fill `from..to` with `leader` characters, ending a little before `to`.
@@ -362,7 +669,17 @@ impl Building {
 /// count for page fields.
 pub(crate) fn layout(p: &Para, width: f64, fields: (usize, usize)) -> Laid {
     let mut styles = vec![p.base.clone()];
-    let atoms = atoms(p, fields, &mut styles);
+    let (mut atoms, mut srcs) = atoms(p, fields, &mut styles);
+    // A right-to-left paragraph is broken into lines in reading order: each run of right-to-left
+    // words, set in visual order by shaping, is turned back first; each line is mirrored after.
+    if p.rtl {
+        logical_order(&mut atoms, &mut srcs);
+    }
+    let align = match p.align {
+        Align::Left if p.rtl => Align::Right,
+        Align::Right if p.rtl => Align::Left,
+        a => a,
+    };
     let width = fin(width, 468.0).clamp(10.0, 100_000.0);
     let left = fin(p.left, 0.0).clamp(-width, width);
     let right_edge = (width - fin(p.right, 0.0).clamp(-width, width)).max(left + 10.0);
@@ -395,10 +712,13 @@ pub(crate) fn layout(p: &Para, width: f64, fields: (usize, usize)) -> Laid {
         lines.push(done);
     };
 
-    for atom in atoms {
+    for (ai, atom) in atoms.into_iter().enumerate() {
         if lines.len() >= MAX_LINES {
             break;
         }
+        // A line's source is its first word, tab or picture (its leading spaces are dropped).
+        let src = srcs.get(ai).copied();
+        let starts = !matches!(atom, Atom::Space(..) | Atom::Break);
         match atom {
             Atom::Break => {
                 cur.resolve_tab(&styles);
@@ -486,6 +806,9 @@ pub(crate) fn layout(p: &Para, width: f64, fields: (usize, usize)) -> Laid {
                 }
             }
         }
+        if starts && cur.src.is_none() {
+            cur.src = src;
+        }
     }
     cur.resolve_tab(&styles);
     cur.forced = true;
@@ -514,7 +837,7 @@ pub(crate) fn layout(p: &Para, width: f64, fields: (usize, usize)) -> Laid {
         b.spaces.retain(|s| *s < trailing);
         let free = right_edge - b.ink;
         let tail = b.after_tab.min(b.items.len());
-        match p.align {
+        match align {
             Align::Center if free > 0.0 => b.items.iter_mut().skip(tail).for_each(|(x, _)| *x += free / 2.0),
             Align::Right if free > 0.0 => b.items.iter_mut().skip(tail).for_each(|(x, _)| *x += free),
             Align::Justify if free > 0.0 && !last => {
@@ -537,10 +860,16 @@ pub(crate) fn layout(p: &Para, width: f64, fields: (usize, usize)) -> Laid {
             match item {
                 Placed::Text(_, si) => {
                     if let Some(s) = styles.get(*si) {
-                        asc = asc.max(s.size * 0.905);
-                        desc = desc.max(s.size * 0.212);
-                        gap = gap.max(s.size * 0.033);
+                        let (a, d, g) = s.line_metrics();
+                        asc = asc.max(s.size * a);
+                        desc = desc.max(s.size * d);
+                        gap = gap.max(s.size * g);
                     }
+                }
+                // An equation has a depth below the baseline, like text.
+                Placed::Image(Pic::Math(m), _, _) => {
+                    asc = asc.max(m.asc);
+                    desc = desc.max(m.desc);
                 }
                 Placed::Image(_, _, h) => asc = asc.max(*h),
             }
@@ -548,16 +877,19 @@ pub(crate) fn layout(p: &Para, width: f64, fields: (usize, usize)) -> Laid {
         if asc <= 0.0 {
             // An empty line is as tall as the paragraph mark's font.
             let s = &p.base;
-            asc = s.size * 0.905;
-            desc = s.size * 0.212;
-            gap = s.size * 0.033;
+            let (a, d, g) = s.line_metrics();
+            asc = s.size * a;
+            desc = s.size * d;
+            gap = s.size * g;
         }
         let natural = asc + desc + gap;
         let (height, baseline) = match p.line {
             LineRule::Auto(m) => {
+                // Word puts the line gap above the text; a multiple over one adds the extra
+                // below, one under one shrinks the space above too.
                 let m = if m.is_finite() { m.clamp(0.25, 10.0) } else { 1.0 };
                 let h = natural * m;
-                (h, h - desc - gap)
+                (h, if m >= 1.0 { gap + asc } else { (gap + asc) * m })
             }
             LineRule::Exact(v) => {
                 let v = if v.is_finite() { v.clamp(0.5, 2000.0) } else { natural };
@@ -565,10 +897,13 @@ pub(crate) fn layout(p: &Para, width: f64, fields: (usize, usize)) -> Laid {
             }
             LineRule::AtLeast(v) => {
                 let h = if v.is_finite() { natural.max(v) } else { natural };
-                (h, h - desc - gap)
+                (h, h - desc)
             }
         };
-        out.push(Line { items: b.items, height, baseline });
+        if p.rtl {
+            mirror_line(&mut b.items, &styles, left, right_edge);
+        }
+        out.push(Line { items: b.items, height, baseline, src: b.src });
     }
     Laid {
         lines: out,
@@ -576,9 +911,103 @@ pub(crate) fn layout(p: &Para, width: f64, fields: (usize, usize)) -> Laid {
         before: fin(p.before, 0.0).clamp(0.0, 2000.0),
         after: fin(p.after, 0.0).clamp(0.0, 2000.0),
         shade: p.shade,
-        page_break_before: p.page_break_before,
         left,
         right: right_edge,
+    }
+}
+
+/// Draw a picture or chart with its bottom-left corner at `(x, y)`.
+pub(crate) fn draw_pic(page: &mut Page, pic: &Pic, x: f64, y: f64, w: f64, h: f64) {
+    match pic {
+        Pic::Image(Some(r)) => page.image(*r, x, y, w, h),
+        Pic::Image(None) => page.placeholder(x, y, w, h),
+        Pic::Cropped(r, [l, t, rr, b]) => {
+            // The whole image is drawn larger and shifted so the kept part fills the box.
+            let (fw, fh) = (w / (1.0 - l - rr).max(0.01), h / (1.0 - t - b).max(0.01));
+            page.save();
+            page.clip_rect(x, y, w, h);
+            page.image(*r, x - l * fw, y - b * fh, fw, fh);
+            page.restore();
+        }
+        Pic::Chart(c) => chart::draw(page, c, x, y, w, h),
+        Pic::Shapes(parts) => {
+            for p in parts.iter() {
+                draw_shape_part(page, p, x, y, w, h);
+            }
+        }
+        Pic::Math(m) => super::math::draw(page, m, x, y + m.desc),
+    }
+}
+
+/// Draw one shape of a drawing whose box is `(x, y)` (bottom left) `w × h`.
+fn draw_shape_part(page: &mut Page, p: &ShapePart, x: f64, y: f64, w: f64, h: f64) {
+    let [fx, fy, fw, fh] = p.rect.map(|v| fin(v, 0.0).clamp(-10.0, 10.0));
+    let (pw, ph) = (fw * w, fh * h);
+    let (px, top) = (x + fx * w, y + h - fy * h);
+    if !(pw.is_finite() && ph.is_finite()) || pw < 0.0 || ph < 0.0 {
+        return;
+    }
+    page.save();
+    if p.rot.is_finite() && p.rot.abs() > 0.01 {
+        // About the shape's centre, clockwise as Office turns it.
+        let (cx, cy) = (px + pw / 2.0, top - ph / 2.0);
+        let (s, c) = (-p.rot.to_radians()).sin_cos();
+        page.raw(&format!(
+            "{} {} {} {} {} {} cm\n",
+            super::canvas::n(c),
+            super::canvas::n(s),
+            super::canvas::n(-s),
+            super::canvas::n(c),
+            super::canvas::n(cx - c * cx + s * cy),
+            super::canvas::n(cy - s * cx - c * cy)
+        ));
+    }
+    if let Some(g) = &p.geom {
+        if p.own_text {
+            super::xlsx_drawing::draw_shape(page, g, px, top - ph, pw, ph);
+        } else {
+            super::xlsx_drawing::draw_geometry(page, g, px, top - ph, pw, ph);
+        }
+    }
+    match p.image {
+        Some(Some(r)) => page.image(r, px, top - ph, pw, ph),
+        Some(None) => page.placeholder(px, top - ph, pw, ph),
+        None => {}
+    }
+    if !p.paras.is_empty() {
+        let [l, t, r, b] = p.inset.map(|v| fin(v, 0.0).clamp(0.0, 500.0));
+        // Vertical text is laid out along the box's height, then turned into it.
+        let (bx, btop, bw, bh) = if p.vert != 0 {
+            turn(page, p.vert, px, top - ph, pw, ph);
+            (0.0, pw, ph, pw)
+        } else {
+            (px, top, pw, ph)
+        };
+        let inner = (bw - l - r).max(4.0);
+        let laids: Vec<Laid> = p.paras.iter().map(|q| layout(q, inner, (1, 1))).collect();
+        let total: f64 = laids.iter().map(Laid::height).sum();
+        let mut yy = btop - t - (bh - t - b - total).max(0.0) * p.anchor.clamp(0.0, 1.0);
+        let px = bx;
+        for (laid, q) in laids.iter().zip(&p.paras) {
+            yy -= draw(page, laid, px + l, yy);
+            // Shapes anchored in the box's own paragraphs (a box in a box) follow them.
+            for f in q.floats.iter().take(64) {
+                draw_pic(page, &f.pic, px + l, yy - f.h, f.w, f.h);
+                yy -= f.h;
+            }
+        }
+    }
+    page.restore();
+}
+
+/// Turn the coordinates so that a box `h` wide and `w` tall, its corner at the origin, fills the
+/// box at `(x, y)` `w × h` turned a quarter: anticlockwise (`dir` 1, reading upwards, the text's
+/// top to the left) or clockwise (-1, reading downwards, its top to the right).
+pub(crate) fn turn(page: &mut Page, dir: i8, x: f64, y: f64, w: f64, h: f64) {
+    if dir > 0 {
+        page.raw(&format!("0 1 -1 0 {} {} cm\n", n(x + w), n(y)));
+    } else {
+        page.raw(&format!("0 -1 1 0 {} {} cm\n", n(x), n(y + h)));
     }
 }
 
@@ -592,8 +1021,11 @@ pub(crate) fn draw_line(page: &mut Page, laid: &Laid, line: &Line, x0: f64, y_to
                     page.text(x0 + x, base, s, t);
                 }
             }
-            Placed::Image(Some(r), w, h) => page.image(*r, x0 + x, base, *w, *h),
-            Placed::Image(None, w, h) => page.placeholder(x0 + x, base, *w, *h),
+            Placed::Image(Pic::Image(Some(r)), w, h) => page.image(*r, x0 + x, base, *w, *h),
+            Placed::Image(Pic::Image(None), w, h) => page.placeholder(x0 + x, base, *w, *h),
+            Placed::Image(Pic::Chart(c), w, h) => chart::draw(page, c, x0 + x, base, *w, *h),
+            Placed::Image(pic @ (Pic::Shapes(_) | Pic::Cropped(..)), w, h) => draw_pic(page, pic, x0 + x, base, *w, *h),
+            Placed::Image(Pic::Math(m), _, _) => super::math::draw(page, m, x0 + x, base),
         }
     }
 }
@@ -664,6 +1096,38 @@ mod tests {
         let (x, Placed::Text(t, si)) = first.items.last().unwrap() else { panic!() };
         let end = x + laid.styles[*si].width(t);
         assert!((end - 120.0).abs() < 0.5, "{end}");
+    }
+
+    #[test]
+    fn right_to_left_paragraphs_wrap_in_reading_order_from_the_right() {
+        let s = RunStyle::default();
+        // Words one to four, as shaping leaves them: in visual order, the last word first.
+        let p = Para { items: vec![Inline::Text("דד גג בב אא".into(), s.clone())], rtl: true, align: Align::Right, ..Para::default() };
+        let width = s.width("אא בב") + 4.0;
+        let laid = layout(&p, width, (1, 1));
+        let words = |li: usize| -> Vec<(f64, String)> {
+            laid.lines[li]
+                .items
+                .iter()
+                .filter_map(|(x, it)| if let Placed::Text(t, _) = it { (!t.trim().is_empty()).then(|| (*x, t.clone())) } else { None })
+                .collect()
+        };
+        assert_eq!(laid.lines.len(), 2);
+        let (first, second) = (words(0), words(1));
+        let x_of = |ws: &[(f64, String)], w: &str| ws.iter().find(|(_, t)| t == w).map(|(x, _)| *x).unwrap();
+        assert!(first.iter().any(|(_, t)| t == "אא") && first.iter().any(|(_, t)| t == "בב"), "the first two words on the first line: {first:?}");
+        assert!(x_of(&first, "אא") > x_of(&first, "בב"), "the first word at the right");
+        assert!(second.iter().any(|(_, t)| t == "גג") && x_of(&second, "גג") > x_of(&second, "דד"), "{second:?}");
+        // Right-aligned: the first word ends at the right edge.
+        assert!((x_of(&first, "אא") + s.width("אא") - laid.right).abs() < 0.5);
+        // Left-to-right words in a right-to-left line keep their order (shaping turns only the
+        // right-to-left runs, so "אא Alfa Beta בב" stays in this order).
+        let p = Para { items: vec![Inline::Text("אא Alfa Beta בב".into(), s.clone())], rtl: true, ..Para::default() };
+        let laid = layout(&p, 400.0, (1, 1));
+        let line: Vec<(f64, String)> =
+            laid.lines[0].items.iter().filter_map(|(x, it)| if let Placed::Text(t, _) = it { Some((*x, t.clone())) } else { None }).collect();
+        let at = |w: &str| line.iter().find(|(_, t)| t == w).map(|(x, _)| *x).unwrap();
+        assert!(at("אא") > at("Beta") && at("Beta") > at("Alfa") && at("Alfa") > at("בב"), "{line:?}");
     }
 
     #[test]
