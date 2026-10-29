@@ -11,6 +11,7 @@ use pdfcraft_cos::{Document, ObjRef};
 use roxmltree::Node;
 
 use super::canvas::{Canvas, n};
+use super::faces::face_of;
 use super::flow::{
     self, Align, Field, Floating, Inline, Laid, LineRule, Para, ParaBorders, Pic, Place, Rule, ShapePart, TabKind, TabStop, Wrap, fin,
 };
@@ -111,6 +112,7 @@ impl RPr {
         };
         RunStyle {
             fam: family_of(font),
+            font: face_of(font),
             bold: self.bold.unwrap_or(false),
             italic: self.italic.unwrap_or(false),
             size: fin(self.size.unwrap_or(10.0), 10.0).clamp(1.0, 400.0),
@@ -3399,7 +3401,57 @@ fn lay_body(
     Ok((fl.page_sections, fl.page_notes, fl.heads))
 }
 
+/// The fonts a document embeds (`fontTable.xml`'s `w:embedRegular`…), de-obfuscated with their
+/// keys (ECMA-376 Part 1 §17.8.1): each font's lower-case name and its four styles.
+fn embedded_fonts(zip: &Zip<'_>, rels: &Rels, notes: &mut Notes) -> Vec<super::faces::DocFont> {
+    let mut out = Vec::new();
+    if !super::faces::embedding_on() {
+        return out;
+    }
+    let Some(part) = rels.of_type("fontTable").map(str::to_owned) else { return out };
+    let Ok(Some(text)) = zip.text(&part) else { return out };
+    let Ok(d) = xml::parse(&text) else { return out };
+    let Ok(frels) = Rels::load(zip, &part) else { return out };
+    for f in children(d.root_element(), "font").take(250) {
+        let Some(name) = attr(f, "name") else { continue };
+        let mut styles = [None; 4];
+        let mut any = false;
+        for (i, (tag, style)) in
+            [("embedRegular", "Regular"), ("embedItalic", "Italic"), ("embedBold", "Bold"), ("embedBoldItalic", "Bold Italic")].iter().enumerate()
+        {
+            let Some(e) = child(f, tag) else { continue };
+            any = true;
+            let Some(mut bytes) = rel_attr(e, "id").and_then(|id| frels.target(id)).and_then(|t| zip.read(t).ok().flatten()) else { continue };
+            // An obfuscated font has its first 32 bytes XORed with its key, a GUID read backwards.
+            if let Some(key) = attr(e, "fontKey") {
+                let hex: String = key.chars().filter(char::is_ascii_hexdigit).collect();
+                if hex.len() != 32 || bytes.len() < 32 {
+                    continue;
+                }
+                let mut k: Vec<u8> = (0..16).filter_map(|i| u8::from_str_radix(hex.get(i * 2..i * 2 + 2)?, 16).ok()).collect();
+                k.reverse();
+                for (j, b) in bytes.iter_mut().take(32).enumerate() {
+                    *b ^= k[j % 16];
+                }
+            }
+            styles[i] = super::faces::document_font(bytes, name, style);
+        }
+        if styles.iter().any(Option::is_some) {
+            out.push((name.to_lowercase(), styles));
+        } else if any {
+            notes.add("fonts embedded in the document that can't be used (licence, format or size), replaced");
+        }
+    }
+    out
+}
+
 pub(crate) fn convert(zip: &Zip<'_>, main: &str, doc: &mut Document, notes: &mut Notes) -> Result<usize, String> {
+    let rels = Rels::load(zip, main)?;
+    let fonts = embedded_fonts(zip, &rels, notes);
+    super::faces::with_document_fonts(fonts, || convert_body(zip, main, doc, notes))
+}
+
+fn convert_body(zip: &Zip<'_>, main: &str, doc: &mut Document, notes: &mut Notes) -> Result<usize, String> {
     let rels = Rels::load(zip, main)?;
     let text = zip.text(main)?.ok_or_else(|| format!("{main} is missing"))?;
     let xd = xml::parse(&text).map_err(|e| format!("{main}: {e}"))?;
@@ -3634,5 +3686,6 @@ pub(crate) fn convert(zip: &Zip<'_>, main: &str, doc: &mut Document, notes: &mut
             }
         }
     }
+    cx.notes.fonts = canvas.embedded_faces();
     canvas.finish(cx.doc).map_err(|e| e.to_string())
 }

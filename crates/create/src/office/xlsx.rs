@@ -1832,7 +1832,12 @@ fn draw_comments(
     if sh.end_comments.is_empty() {
         return Ok(());
     }
-    let style = styles.fonts.first().map_or_else(RunStyle::default, |f| RunStyle { fam: family_of(&f.name), size: f.size, ..RunStyle::default() });
+    let style = styles.fonts.first().map_or_else(RunStyle::default, |f| RunStyle {
+        fam: family_of(&f.name),
+        font: super::faces::face_of(&f.name),
+        size: f.size,
+        ..RunStyle::default()
+    });
     let (pw, ph) = if sh.landscape { (sh.paper.1, sh.paper.0) } else { sh.paper };
     let [mt, mr, mb, ml] = sh.margins;
     let area_w = (pw - ml - mr).max(72.0);
@@ -1927,6 +1932,7 @@ impl Grid<'_> {
         });
         RunStyle {
             fam: family_of(&f.name),
+            font: super::faces::face_of(&f.name),
             bold: f.bold,
             italic: f.italic,
             size: f.size,
@@ -1945,6 +1951,7 @@ impl Grid<'_> {
         let name = l.name.as_deref();
         RunStyle {
             fam: name.map_or(base.fam, family_of),
+            font: name.map_or(base.font, super::faces::face_of),
             size: l.size.unwrap_or(base.size),
             color: cell.color.or(l.color).unwrap_or(base.color),
             bold: l.bold,
@@ -2087,9 +2094,12 @@ fn draw_sheet(canvas: &mut Canvas, sh: &Sheet, styles: &Styles, notes: &mut Note
         let (a, d, gap) = st.line_metrics();
         ((st.size * 4.0 / 3.0).round() * (a + d + gap)).round()
     };
-    let default_px =
-        line_px(&styles.fonts.first().map_or_else(RunStyle::default, |f| RunStyle { fam: family_of(&f.name), size: f.size, ..RunStyle::default() }))
-            + 2.0;
+    let default_px = line_px(&styles.fonts.first().map_or_else(RunStyle::default, |f| RunStyle {
+        fam: family_of(&f.name),
+        font: super::faces::face_of(&f.name),
+        size: f.size,
+        ..RunStyle::default()
+    })) + 2.0;
     // Row → (fitted pixels, keep the saved height).
     let mut fit: HashMap<u32, (f64, bool)> = HashMap::new();
     for ((r, c), cell) in &sh.cells {
@@ -2171,8 +2181,12 @@ fn draw_sheet(canvas: &mut Canvas, sh: &Sheet, styles: &Styles, notes: &mut Note
     let no_breaks = BTreeSet::new();
     // Printed headings: a column of row numbers as wide as the longest one, and a row of column
     // letters as tall as a default row, in the sheet's default font.
-    let head_font =
-        styles.fonts.first().map_or_else(RunStyle::default, |f| RunStyle { fam: family_of(&f.name), size: f.size, ..RunStyle::default() });
+    let head_font = styles.fonts.first().map_or_else(RunStyle::default, |f| RunStyle {
+        fam: family_of(&f.name),
+        font: super::faces::face_of(&f.name),
+        size: f.size,
+        ..RunStyle::default()
+    });
     let head_w = if sh.headings { head_font.width(&max_row.to_string()) + 8.0 } else { 0.0 };
     let head_h = if sh.headings { sh.default_h } else { 0.0 };
     let mut first = true;
@@ -3023,7 +3037,12 @@ pub(crate) fn convert(zip: &Zip<'_>, main: &str, name: &str, doc: &mut Document,
     // Headers and footers, now that the page count is known: pages are numbered through the
     // workbook, as Excel prints a whole workbook.
     let total = canvas.pages.len();
-    let base = styles.fonts.first().map_or_else(RunStyle::default, |f| RunStyle { fam: family_of(&f.name), size: f.size, ..RunStyle::default() });
+    let base = styles.fonts.first().map_or_else(RunStyle::default, |f| RunStyle {
+        fam: family_of(&f.name),
+        font: super::faces::face_of(&f.name),
+        size: f.size,
+        ..RunStyle::default()
+    });
     let first_pages: HashMap<usize, usize> = jobs.iter().fold(HashMap::new(), |mut m, j| {
         let e = m.entry(j.sheet).or_insert(j.page);
         *e = (*e).min(j.page);
@@ -3045,6 +3064,7 @@ pub(crate) fn convert(zip: &Zip<'_>, main: &str, name: &str, doc: &mut Document,
             }
         }
     }
+    notes.fonts = canvas.embedded_faces();
     canvas.finish(doc).map_err(|e| e.to_string())
 }
 

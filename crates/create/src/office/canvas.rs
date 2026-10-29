@@ -1,16 +1,17 @@
 //! Page content for imported Office documents: text in the standard-14 faces (WinAnsi, plus the
-//! Latin letters of [`super::latin`] through a second encoding of each face), filled and
-//! stroked paths, image XObjects, link areas and bookmarks. Pages are kept until
-//! [`Canvas::finish`] so a converter can go back to a page (headers and footers are drawn once
-//! the page count is known).
+//! Latin letters of [`super::latin`] through a second encoding of each face) or in the embedded
+//! metric-compatible faces of [`super::faces`] (subset, one Type0 font per face for the whole
+//! document), filled and stroked paths, and image XObjects. Pages are kept until [`Canvas::finish`] so a converter can
+//! go back to a page (headers and footers are drawn once the page count is known).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use pdfcraft_cos::{Dict, Document, ObjRef, Object, PdfString, Stream};
 use pdfcraft_fonts::{Std14, literal, win_ansi_byte};
 
-use super::{LinkTarget, RunStyle, latin};
+use super::{LinkTarget, RunStyle, faces, latin};
 use crate::CreateError;
 
 /// Most pages one conversion may produce.
@@ -56,8 +57,18 @@ pub(crate) struct Page {
     fonts: u16,
     latin_fonts: u16,
     images: Vec<ObjRef>,
+    /// Glyphs drawn in embedded faces: (face slot, glyph id) and the character it shows.
+    glyphs: BTreeMap<(usize, u16), char>,
     /// Clickable areas (left, bottom, right, top) and where each goes.
     links: Vec<([f64; 4], Arc<LinkTarget>)>,
+}
+
+/// A piece of a text run shown with one font.
+enum Run {
+    /// Standard-14 bytes, in WinAnsi or (`true`) the extra Latin encoding.
+    Std(bool, Vec<u8>),
+    /// Glyph ids of an embedded face slot.
+    Embedded(usize, Vec<u16>),
 }
 
 impl Page {
@@ -86,26 +97,50 @@ impl Page {
         }
         let face = face_index(style.face());
         self.push(&format!("BT {} rg 1 0 0 1 {} {} Tm ", rgb(style.color), n(x), n(y)));
-        // Runs of WinAnsi text and runs of extra Latin letters, each shown in its own font.
-        let mut run: Option<(bool, Vec<u8>)> = None;
+        // The run's embedded face, or the standard face with its embedded stand-in for the
+        // characters it can't draw.
+        let embedded = faces::loaded(style.font, style.bold, style.italic);
+        let fallback = if embedded.is_none() { faces::fallback(style.fam, style.bold, style.italic) } else { None };
+        let mut runs: Vec<Run> = Vec::new();
         for c in s.chars() {
-            let (extra, byte) = match (win_ansi_byte(if c == '\t' { ' ' } else { c }), latin::code(c)) {
-                (Some(b), _) => (false, b),
-                (None, Some(b)) => (true, b),
-                (None, None) => (false, b'?'),
+            let c = if c == '\t' { ' ' } else { c };
+            let glyph = |l: &faces::Loaded| l.glyph(c).or_else(|| l.glyph(' ')).map_or(0, |g| g.0);
+            // A face for scripts the run's face lacks (Japanese, Chinese, Korean, symbols).
+            let script = || faces::script_fallback(c).and_then(|(slot, l)| l.glyph(c).map(|g| Run::Embedded(slot, vec![g.0])));
+            let piece = match (embedded, win_ansi_byte(c), latin::code(c)) {
+                (Some((slot, l)), _, _) if l.covers(c) => Run::Embedded(slot, vec![glyph(l)]),
+                (Some((slot, l)), _, _) => script().unwrap_or_else(|| Run::Embedded(slot, vec![glyph(l)])),
+                (None, Some(b), _) => Run::Std(false, vec![b]),
+                (None, None, Some(b)) => Run::Std(true, vec![b]),
+                (None, None, None) => match fallback {
+                    Some((slot, l)) if l.covers(c) => Run::Embedded(slot, vec![glyph(l)]),
+                    _ => script().unwrap_or_else(|| Run::Std(false, vec![b'?'])),
+                },
             };
-            match &mut run {
-                Some((e, bytes)) if *e == extra => bytes.push(byte),
-                _ => {
-                    if let Some((e, bytes)) = run.take() {
-                        self.show(face, e, size, &bytes);
-                    }
-                    run = Some((extra, vec![byte]));
-                }
+            if let Run::Embedded(slot, g) = &piece
+                && let Some(gid) = g.first()
+            {
+                self.glyphs.entry((*slot, *gid)).or_insert(c);
+            }
+            match (runs.last_mut(), piece) {
+                (Some(Run::Std(e, bytes)), Run::Std(pe, pb)) if *e == pe => bytes.extend(pb),
+                (Some(Run::Embedded(s1, gids)), Run::Embedded(s2, pg)) if *s1 == s2 => gids.extend(pg),
+                (_, piece) => runs.push(piece),
             }
         }
-        if let Some((e, bytes)) = run {
-            self.show(face, e, size, &bytes);
+        for run in runs {
+            match run {
+                Run::Std(e, bytes) => self.show(face, e, size, &bytes),
+                Run::Embedded(slot, gids) => {
+                    let mut hex = String::with_capacity(gids.len() * 4 + 2);
+                    hex.push('<');
+                    for g in gids {
+                        let _ = write!(hex, "{g:04X}");
+                    }
+                    hex.push('>');
+                    self.push(&format!("/E{slot} {} Tf {hex} Tj ", n(size)));
+                }
+            }
         }
         self.push("ET\n");
         let t = (size * 0.06).max(0.4);
@@ -242,7 +277,16 @@ impl Canvas {
         if self.pages.len() >= MAX_PAGES {
             return Err(format!("the document needs more than {MAX_PAGES} pages"));
         }
-        self.pages.push(Page { w: side(w), h: side(h), ops: Vec::new(), fonts: 0, latin_fonts: 0, images: Vec::new(), links: Vec::new() });
+        self.pages.push(Page {
+            w: side(w),
+            h: side(h),
+            ops: Vec::new(),
+            fonts: 0,
+            latin_fonts: 0,
+            images: Vec::new(),
+            glyphs: BTreeMap::new(),
+            links: Vec::new(),
+        });
         Ok(self.pages.len() - 1)
     }
 
@@ -258,10 +302,42 @@ impl Canvas {
         self.pages.get_mut(i)
     }
 
+    /// How many embedded faces the pages use so far.
+    pub(crate) fn embedded_faces(&self) -> usize {
+        let mut slots: Vec<usize> = self.pages.iter().flat_map(|p| p.glyphs.keys().map(|(s, _)| *s)).collect();
+        slots.sort_unstable();
+        slots.dedup();
+        slots.len()
+    }
+
     /// Write every page into `doc`. A document always gets at least one page.
     pub(crate) fn finish(mut self, doc: &mut Document) -> Result<usize, CreateError> {
         if self.pages.is_empty() {
-            self.pages.push(Page { w: 612.0, h: 792.0, ops: Vec::new(), fonts: 0, latin_fonts: 0, images: Vec::new(), links: Vec::new() });
+            self.pages.push(Page {
+                w: 612.0,
+                h: 792.0,
+                ops: Vec::new(),
+                fonts: 0,
+                latin_fonts: 0,
+                images: Vec::new(),
+                glyphs: BTreeMap::new(),
+                links: Vec::new(),
+            });
+        }
+        // One subset font per embedded face, holding the glyphs of every page.
+        let mut used: BTreeMap<usize, BTreeMap<u16, char>> = BTreeMap::new();
+        for page in &self.pages {
+            for ((slot, gid), c) in &page.glyphs {
+                used.entry(*slot).or_default().entry(*gid).or_insert(*c);
+            }
+        }
+        let mut embedded: BTreeMap<usize, ObjRef> = BTreeMap::new();
+        for (slot, glyphs) in &used {
+            if let Some(l) = faces::by_slot(*slot)
+                && let Some(r) = embed_face(doc, l, glyphs)
+            {
+                embedded.insert(*slot, r);
+            }
         }
         let mut fonts: [Option<ObjRef>; 12] = [None; 12];
         let mut latin_fonts: [Option<ObjRef>; 12] = [None; 12];
@@ -310,6 +386,16 @@ impl Canvas {
                     }
                 };
                 font_dict.set(format!("L{i}").into_bytes(), Object::Ref(r));
+            }
+            let slots: Vec<usize> = {
+                let mut s: Vec<usize> = page.glyphs.keys().map(|(s, _)| *s).collect();
+                s.dedup();
+                s
+            };
+            for slot in slots {
+                if let Some(r) = embedded.get(&slot) {
+                    font_dict.set(format!("E{slot}").into_bytes(), Object::Ref(*r));
+                }
             }
             let mut res = Dict::new();
             if !font_dict.is_empty() {
@@ -431,6 +517,97 @@ fn write_outline(doc: &mut Document, items: &[(u8, String, usize, f64)], dest: &
         d.set(b"Count".to_vec(), Object::Int(items.len() as i64));
     });
     let _ = doc.update_dict(catalog, |d| d.set(b"Outlines".to_vec(), Object::Ref(root)));
+}
+
+/// A six-letter subset tag from the glyphs a subset holds (ISO 32000-2 §9.6.4).
+fn subset_tag(glyphs: &BTreeMap<u16, char>) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for g in glyphs.keys() {
+        for b in g.to_be_bytes() {
+            h = (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    (0..6).map(|i| char::from(b'A' + ((h >> (i * 8)) % 26) as u8)).collect()
+}
+
+/// Embed `glyphs` of face `l` as a Type0 font with a subset TrueType program, Identity-H
+/// glyph-id codes, its advances and a `/ToUnicode` map. `None` when the program can't be subset.
+fn embed_face(doc: &mut Document, l: &faces::Loaded, glyphs: &BTreeMap<u16, char>) -> Option<ObjRef> {
+    let keep = glyphs.keys().copied().collect();
+    let program = super::ttf::subset(l.bytes, &keep)?;
+    let name = format!("{}+{}", subset_tag(glyphs), l.name);
+    let mut file = Dict::new();
+    file.set(b"Length1".to_vec(), Object::Int(program.len() as i64));
+    let file = doc.add(Object::Stream(Stream::flate(file, &program)));
+    let mut flags = 32;
+    if l.name.contains("Mono") {
+        flags |= 1;
+    }
+    if l.name.starts_with("Caladea") || l.name.contains("Serif") {
+        flags |= 2;
+    }
+    if l.italic_angle != 0.0 {
+        flags |= 64;
+    }
+    let mut desc = Dict::new();
+    desc.set(b"Type".to_vec(), Object::name("FontDescriptor"));
+    desc.set(b"FontName".to_vec(), Object::name(&name));
+    desc.set(b"Flags".to_vec(), Object::Int(flags));
+    desc.set(b"FontBBox".to_vec(), Object::Array(l.bbox.iter().map(|v| Object::Real(v.round())).collect()));
+    desc.set(b"ItalicAngle".to_vec(), Object::Real(l.italic_angle));
+    desc.set(b"Ascent".to_vec(), Object::Real(l.ascent.round()));
+    desc.set(b"Descent".to_vec(), Object::Real(l.descent.round()));
+    desc.set(b"CapHeight".to_vec(), Object::Real(l.cap_height.round()));
+    desc.set(b"StemV".to_vec(), Object::Int(80));
+    desc.set(b"FontFile2".to_vec(), Object::Ref(file));
+    let desc = doc.add(desc);
+    let widths: Vec<Object> = glyphs
+        .keys()
+        .flat_map(|g| {
+            [
+                Object::Int(i64::from(*g)),
+                Object::Array(vec![Object::Real((l.advances.get(usize::from(*g)).copied().unwrap_or(0.0) * 1000.0).round() / 1000.0)]),
+            ]
+        })
+        .collect();
+    let mut system = Dict::new();
+    system.set(b"Registry".to_vec(), Object::String(PdfString::literal(b"Adobe".to_vec())));
+    system.set(b"Ordering".to_vec(), Object::String(PdfString::literal(b"Identity".to_vec())));
+    system.set(b"Supplement".to_vec(), Object::Int(0));
+    let mut cid = Dict::new();
+    cid.set(b"Type".to_vec(), Object::name("Font"));
+    cid.set(b"Subtype".to_vec(), Object::name("CIDFontType2"));
+    cid.set(b"BaseFont".to_vec(), Object::name(&name));
+    cid.set(b"CIDSystemInfo".to_vec(), Object::Dict(system));
+    cid.set(b"FontDescriptor".to_vec(), Object::Ref(desc));
+    cid.set(b"CIDToGIDMap".to_vec(), Object::name("Identity"));
+    cid.set(b"W".to_vec(), Object::Array(widths));
+    let cid = doc.add(cid);
+    let mut cmap = String::from(
+        "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n/CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n",
+    );
+    let pairs: Vec<(&u16, &char)> = glyphs.iter().collect();
+    for block in pairs.chunks(100) {
+        let _ = writeln!(cmap, "{} beginbfchar", block.len());
+        for (g, c) in block {
+            // A shaped glyph shows the letters it was shaped from (maybe none, for a mark).
+            let text = faces::shaped_text(**c).unwrap_or_else(|| c.to_string());
+            let hex: String = text.encode_utf16().take(64).map(|u| format!("{u:04X}")).collect();
+            let hex = if hex.is_empty() { "200B".to_owned() } else { hex };
+            let _ = writeln!(cmap, "<{g:04X}> <{hex}>");
+        }
+        cmap.push_str("endbfchar\n");
+    }
+    cmap.push_str("endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n");
+    let to_unicode = doc.add(Object::Stream(Stream::flate(Dict::new(), cmap.as_bytes())));
+    let mut top = Dict::new();
+    top.set(b"Type".to_vec(), Object::name("Font"));
+    top.set(b"Subtype".to_vec(), Object::name("Type0"));
+    top.set(b"BaseFont".to_vec(), Object::name(&name));
+    top.set(b"Encoding".to_vec(), Object::name("Identity-H"));
+    top.set(b"DescendantFonts".to_vec(), Object::Array(vec![Object::Ref(cid)]));
+    top.set(b"ToUnicode".to_vec(), Object::Ref(to_unicode));
+    Some(doc.add(top))
 }
 
 /// The extra Latin encoding (`/Differences` naming [`latin::LETTERS`] from

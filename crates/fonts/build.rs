@@ -4,6 +4,9 @@
 //! and any `Arab`, `Telu`, `Hebr`, `Thai` or `Deva` face), to keep the web build within hosting
 //! limits (Cloudflare Pages: 25 MiB per file). Native builds also read the optional
 //! `fonts/simplified-chinese-manifest.txt` (LXGW WenKai Lite); it is never embedded on wasm.
+//! Native builds also take the Office faces of the optional `fonts/latin-manifest.txt`: Carlito,
+//! Caladea and Liberation Sans, Serif and Mono, the metric-compatible stand-ins for Calibri,
+//! Cambria, Arial, Times New Roman and Courier New that Office import embeds (not on wasm either).
 //! `CRAFT_FONTS_REQUIRED` makes both the checkout and that native manifest required.
 
 use std::fmt::Write as _;
@@ -40,8 +43,17 @@ fn main() {
 /// never pass the Chinese UI tests only by skipping them.
 fn craft_fonts(dir: &std::path::Path, required: bool) -> Result<String, String> {
     let wasm = std::env::var("CARGO_CFG_TARGET_ARCH").is_ok_and(|a| a == "wasm32");
-    let mut out = manifest(dir, &dir.join("fonts/manifest.txt"), wasm, false)?;
+    let mut out = manifest(dir, &dir.join("fonts/manifest.txt"), wasm, false, None)?;
     if !wasm {
+        // Office import's metric-compatible faces: optional, and never a reason to fail.
+        let latin = dir.join("fonts/latin-manifest.txt");
+        println!("cargo::rerun-if-changed={}", latin.display());
+        if latin.try_exists().unwrap_or(false) {
+            match manifest(dir, &latin, false, false, Some(OFFICE_FAMILIES)) {
+                Ok(entries) => out.push_str(&entries),
+                Err(e) => println!("cargo::warning=skipping optional Office fonts: {e}"),
+            }
+        }
         let chinese = dir.join("fonts/simplified-chinese-manifest.txt");
         println!("cargo::rerun-if-changed={}", chinese.display());
         match chinese.try_exists() {
@@ -49,7 +61,7 @@ fn craft_fonts(dir: &std::path::Path, required: bool) -> Result<String, String> 
                 return Err(format!("{}: CRAFT_FONTS_REQUIRED is set but the simplified-Chinese font manifest is missing", chinese.display()));
             }
             Ok(false) => {}
-            Ok(true) => match manifest(dir, &chinese, false, required) {
+            Ok(true) => match manifest(dir, &chinese, false, required, None) {
                 Ok(entries) => out.push_str(&entries),
                 // A broken optional addition must never discard the main Japanese/symbol/RTL faces.
                 Err(e) if required => return Err(e),
@@ -62,12 +74,18 @@ fn craft_fonts(dir: &std::path::Path, required: bool) -> Result<String, String> 
     Ok(out)
 }
 
-/// One `CraftFont { .. }` initialiser per manifest line.
+/// The families of `fonts/latin-manifest.txt` that Office import embeds.
+/// Gelasio, Selawik and Liberation Sans Narrow (the twins of Georgia, Segoe UI and Arial Narrow)
+/// are taken too once craft-fonts has them.
+const OFFICE_FAMILIES: &[&str] =
+    &["Carlito", "Caladea", "Liberation Sans", "Liberation Serif", "Liberation Mono", "Gelasio", "Selawik", "Liberation Sans Narrow"];
+
+/// One `CraftFont { .. }` initialiser per manifest line (only the `only` families when given).
 ///
 /// `strict_cap` is set for the required native Simplified Chinese manifest: a face that does not
 /// fit its cap must fail the build rather than be silently left out, so a required build cannot
 /// pass without the Chinese face it promises.
-fn manifest(dir: &std::path::Path, manifest: &std::path::Path, wasm: bool, strict_cap: bool) -> Result<String, String> {
+fn manifest(dir: &std::path::Path, manifest: &std::path::Path, wasm: bool, strict_cap: bool, only: Option<&[&str]>) -> Result<String, String> {
     println!("cargo::rerun-if-changed={}", manifest.display());
     let text = std::fs::read_to_string(manifest).map_err(|e| format!("{}: {e}", manifest.display()))?;
     let mut out = String::new();
@@ -80,6 +98,9 @@ fn manifest(dir: &std::path::Path, manifest: &std::path::Path, wasm: bool, stric
         let [family, style, file, scripts, ..] = f.as_slice() else {
             return Err(format!("malformed manifest line: {line}"));
         };
+        if only.is_some_and(|names| !names.contains(family)) {
+            continue;
+        }
         // Keep the upstream general CJK size cap. The separately pinned native Chinese UI
         // face has its own bound; web builds retain the smaller general limit. A required
         // Chinese face over its cap fails the build instead of being silently omitted.
@@ -147,13 +168,13 @@ mod manifest_tests {
         let path = root.join("manifest.txt");
         for scripts in ["Hant,Latn", "Hans-HK,Latn", "Latn"] {
             std::fs::write(&path, format!("Fixture | Regular | face.ttf | {scripts}\n")).unwrap();
-            assert!(manifest(&root, &path, false, true).unwrap_err().contains("no Hans face"), "{scripts}");
-            assert!(manifest(&root, &path, false, false).unwrap().contains("CraftFont {"), "optional input stays usable");
+            assert!(manifest(&root, &path, false, true, None).unwrap_err().contains("no Hans face"), "{scripts}");
+            assert!(manifest(&root, &path, false, false, None).unwrap().contains("CraftFont {"), "optional input stays usable");
         }
         std::fs::write(&path, "Fixture | Regular | face.ttf | Latn, Hans\n").unwrap();
-        assert!(manifest(&root, &path, false, true).unwrap().contains("CraftFont {"));
+        assert!(manifest(&root, &path, false, true, None).unwrap().contains("CraftFont {"));
         std::fs::remove_file(root.join("face.ttf")).unwrap();
-        assert!(manifest(&root, &path, false, true).is_err(), "a missing Hans asset cannot satisfy required input");
+        assert!(manifest(&root, &path, false, true, None).is_err(), "a missing Hans asset cannot satisfy required input");
         std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -26,6 +26,9 @@ flate2 = { workspace = true }
 roxmltree = "0.20"
 # Excel date serials become calendar dates through chrono (no hand-rolled calendar code).
 chrono = { workspace = true, features = ["clock"] }
+# Reads the metric-compatible craft-fonts faces embedded in Office conversions (already in the
+# tree through pdfcraft-fonts).
+skrifa = "0.44"
 # The current date and time for Excel headers and footers (`&D`, `&T`), in the browser too.
 web-time = { workspace = true }
 

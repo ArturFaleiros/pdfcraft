@@ -193,6 +193,7 @@ pub(crate) fn shape(sp: Node<'_, '_>, theme: &[[f64; 3]], notes: &mut Notes) -> 
             let rpr = child(r, "rPr");
             let st = RunStyle {
                 fam: family_of(rpr.and_then(|r| child(r, "latin")).and_then(|l| attr(l, "typeface")).unwrap_or("Calibri")),
+                font: super::faces::face_of(rpr.and_then(|r| child(r, "latin")).and_then(|l| attr(l, "typeface")).unwrap_or("Calibri")),
                 bold: rpr.and_then(|r| attr(r, "b")).is_some_and(|v| v == "1" || v == "true"),
                 italic: rpr.and_then(|r| attr(r, "i")).is_some_and(|v| v == "1" || v == "true"),
                 size: rpr.and_then(|r| attr_f64(r, "sz")).map_or(11.0, |s| (s / 100.0).clamp(1.0, 400.0)),

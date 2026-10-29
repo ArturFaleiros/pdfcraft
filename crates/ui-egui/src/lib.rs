@@ -624,7 +624,8 @@ pub(crate) fn office_note(name: &str, report: &pdfcraft_engine::OfficeReport) ->
 #[cfg(test)]
 #[test]
 fn office_conversions_are_noted_only_when_something_was_approximated() {
-    let mut report = pdfcraft_engine::OfficeReport { kind: pdfcraft_engine::OfficeKind::Word, pages: 1, escaped: 0, notes: Vec::new() };
+    let mut report =
+        pdfcraft_engine::OfficeReport { kind: pdfcraft_engine::OfficeKind::Word, pages: 1, escaped: 0, notes: Vec::new(), fonts_embedded: 0 };
     assert_eq!(office_note("a.docx", &report), None, "an exact conversion opens without a notice");
     report.notes = vec!["charts drawn as boxes: 2".into(), "embedded objects: 1".into()];
     assert_eq!(office_note("a.docx", &report).as_deref(), Some("Converted a.docx. Approximated: charts drawn as boxes: 2; embedded objects: 1"));

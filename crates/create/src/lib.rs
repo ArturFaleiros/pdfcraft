@@ -8,7 +8,7 @@ mod extract;
 mod upright_image;
 pub use extract::{ExtractedImage, ImageExport, extract_images, image_file};
 mod office;
-pub use office::{OFFICE_EXTENSIONS, OfficeKind, OfficeReport, from_office};
+pub use office::{OFFICE_EXTENSIONS, OfficeKind, OfficeOptions, OfficeReport, from_office, from_office_with};
 use pdfcraft_fonts::{literal, win_ansi, wrap};
 
 #[derive(Debug, thiserror::Error, PartialEq)]

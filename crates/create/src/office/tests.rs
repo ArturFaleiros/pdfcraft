@@ -17,6 +17,13 @@ const S: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 const REL: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
 const T: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 
+/// These tests read the content streams the standard faces write (literal strings, `/F` fonts),
+/// so they convert with embedding off: they hold with or without the craft-fonts build input.
+/// The embedded faces have tests of their own.
+fn from_office(name: &str, bytes: &[u8]) -> Result<(Document, OfficeReport), crate::CreateError> {
+    from_office_with(name, bytes, OfficeOptions { embed_fonts: false })
+}
+
 fn rels(items: &[(&str, &str, &str)]) -> String {
     let mut s = format!(r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="{REL}">"#);
     for (id, ty, target) in items {
@@ -2185,4 +2192,77 @@ fn excel_prints_row_and_column_headings_and_mac_column_widths() {
     };
     let app = b"<Properties><Application>Microsoft Macintosh Excel</Application></Properties>";
     assert!(x_b(&[("docProps/app.xml", app)]) > x_b(&[]) + 5.0);
+}
+
+#[test]
+fn fonts_embedded_in_a_word_file_are_used_when_their_licence_allows() {
+    // A document embedding a font under a name of its own, obfuscated as Word saves it; and a
+    // damaged one. The font is craft-fonts' Carlito, so the first case needs a build with it.
+    let key = "{6C5E6D9A-1B2C-4D3E-8F70-0A1B2C3D4E5F}";
+    let obfuscate = |mut bytes: Vec<u8>| {
+        let hex: String = key.chars().filter(char::is_ascii_hexdigit).collect();
+        let mut k: Vec<u8> = (0..16).map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap()).collect();
+        k.reverse();
+        for (j, b) in bytes.iter_mut().take(32).enumerate() {
+            *b ^= k[j % 16];
+        }
+        bytes
+    };
+    let carlito = pdfcraft_fonts::CRAFT_FONTS.iter().find(|f| f.family == "Carlito" && f.style == "Regular").map(|f| f.bytes.to_vec());
+    let convert = |font: Vec<u8>| {
+        let table = format!(
+            r#"<w:fonts xmlns:w="{W}" xmlns:r="{R}"><w:font w:name="Fonte Propria"><w:embedRegular r:id="rId1" w:fontKey="{key}"/></w:font></w:fonts>"#
+        );
+        let table_rels = rels(&[("rId1", "font", "fonts/font1.odttf")]);
+        let body = r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Fonte Propria" w:hAnsi="Fonte Propria"/></w:rPr><w:t>Letra propria</w:t></w:r></w:p>"#;
+        let font = obfuscate(font);
+        let bytes = docx(
+            body,
+            &[("word/fontTable.xml", table.as_bytes()), ("word/_rels/fontTable.xml.rels", table_rels.as_bytes()), ("word/fonts/font1.odttf", &font)],
+            &[("rIdFT", "fontTable", "fontTable.xml")],
+        );
+        super::from_office("p.docx", &bytes).unwrap()
+    };
+    let (doc, report) = convert(b"not a font at all, only bytes long enough to be obfuscated".to_vec());
+    assert!(report.notes.iter().any(|n| n.contains("fonts embedded in the document")), "a damaged font is refused: {report:?}");
+    assert!(content(&reopen(&doc), &pages(&reopen(&doc))[0]).contains("(Letra"), "the text in a standard face");
+    if let (Some(font), true) = (carlito, super::faces::embedding_on()) {
+        let (doc, report) = convert(font);
+        assert!(!report.notes.iter().any(|n| n.contains("fonts embedded")), "{report:?}");
+        let doc = reopen(&doc);
+        let pg = pages(&doc);
+        let fonts = pg[0].get(b"Resources").unwrap().as_dict().unwrap().get(b"Font").unwrap().as_dict().unwrap().clone();
+        assert!(
+            fonts.iter().any(|(k, _)| k.starts_with(b"E100")),
+            "the document's own font, in its slot: {:?}",
+            fonts.iter().map(|(k, _)| String::from_utf8_lossy(k).into_owned()).collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn office_faces_are_embedded_when_the_build_has_them() {
+    let body = r#"<w:p><w:r><w:t>Calibri text</w:t></w:r></w:p><w:p><w:pPr><w:bidi/></w:pPr><w:r><w:t>שלום עולם</w:t></w:r></w:p>"#;
+    let bytes = docx(body, &[], &[]);
+    let (doc, report) = super::from_office("e.docx", &bytes).unwrap();
+    let doc = reopen(&doc);
+    let pg = pages(&doc);
+    let fonts = pg[0].get(b"Resources").unwrap().as_dict().unwrap().get(b"Font").unwrap().as_dict().unwrap().clone();
+    let names: Vec<String> =
+        fonts.iter().map(|(_, r)| String::from_utf8_lossy(doc.resolve(r).as_dict().unwrap().name(b"BaseFont").unwrap()).into_owned()).collect();
+    if super::faces::loaded(super::faces::Face::Carlito, false, false).is_some() {
+        assert!(report.fonts_embedded >= 1, "{report:?}");
+        assert!(names.iter().any(|n| n.ends_with("+Carlito-Regular")), "a subset of Carlito for Calibri: {names:?}");
+        assert!(!report.notice().contains("uses standard PDF fonts"));
+        if pdfcraft_fonts::document_hebrew_font(false).is_some() {
+            assert_eq!(report.escaped, 0, "Hebrew is shaped in its face, not escaped: {report:?}");
+        }
+    } else {
+        assert_eq!(report.fonts_embedded, 0);
+        assert!(names.iter().any(|n| n == "Helvetica"), "{names:?}");
+        assert!(report.notice().contains("uses standard PDF fonts"));
+    }
+    // Asking for the standard faces always gets them.
+    let (_, std) = from_office_with("e.docx", &bytes, OfficeOptions { embed_fonts: false }).unwrap();
+    assert_eq!(std.fonts_embedded, 0);
 }

@@ -1,6 +1,6 @@
 # Word, PowerPoint and Excel to PDF
 
-> **Status:** M10 candidate, native import of Office Open XML · **Revision history:** 2026-10-14 first version; 2026-10-16 #2871 workflow completion and reporting; 2026-10-22 Turkish and Central European letters drawn, UI notices translated and shown only when something was approximated; 2026-10-25 review fixes (Word 2010 text boxes, nested boxes, master placeholders, merged table cells, stored column widths) and the known gaps listed; 2026-10-27 wording: what can be left out, which workflows convert off the UI thread; 2026-10-30 fidelity (#2326 follow-up): tabs and leaders, paragraph and table-style borders, header tables, floating pictures and tables, text columns, footnotes on their reference's page, shapes, text boxes and SmartArt drawn in place, equations laid out, live page, date and style-reference fields, picture crops, widow and orphan control, page borders and colour, line numbers, drop caps, links and bookmarks; Excel print setup, headers and footers, conditional formatting with formula rules, formatted tables, pictures, shapes, sparklines and charts on sheets and chart sheets, cell text rotation and rich text, number format colours, fractions and conditions, unsaved formulas calculated; EMF and WMF pictures as vectors, charts from their cached values.
+> **Status:** M10 candidate, native import of Office Open XML · **Revision history:** 2026-10-14 first version; 2026-10-16 #2871 workflow completion and reporting; 2026-10-22 Turkish and Central European letters drawn, UI notices translated and shown only when something was approximated; 2026-10-25 review fixes (Word 2010 text boxes, nested boxes, master placeholders, merged table cells, stored column widths) and the known gaps listed; 2026-10-27 wording: what can be left out, which workflows convert off the UI thread; 2026-10-30 fidelity (#2326 follow-up): tabs and leaders, paragraph and table-style borders, header tables, floating pictures and tables, text columns, footnotes on their reference's page, shapes, text boxes and SmartArt drawn in place, equations laid out, live page, date and style-reference fields, picture crops, widow and orphan control, page borders and colour, line numbers, drop caps, links and bookmarks; Excel print setup, headers and footers, conditional formatting with formula rules, formatted tables, pictures, shapes, sparklines and charts on sheets and chart sheets, cell text rotation and rich text, number format colours, fractions and conditions, unsaved formulas calculated; EMF and WMF pictures as vectors, charts from their cached values; 2026-10-30 embedded fonts: metric-compatible craft-fonts faces for Calibri, Cambria, Arial, Times New Roman and Courier New (Georgia, Segoe UI and Arial Narrow once craft-fonts has them), CJK, symbol, Arabic and Hebrew text, right-to-left lines in reading order, and fonts embedded in Word files.
 
 PdfCraft opens Word (`.docx`, `.docm`, `.dotx`), PowerPoint (`.pptx`, `.pptm`, `.ppsx`, `.potx`) and
 Excel (`.xlsx`, `.xlsm`, `.xltx`) files as new, unsaved PDFs. The conversion is native Rust in
@@ -43,7 +43,7 @@ it works in the browser build too. The source file is only read.
   `basedOn` chains and document defaults, direct formatting (font family, size, bold, italic,
   underline, strike-through, colour, highlight and shading, super- and subscript, caps, hidden
   text), alignment including justification, indents and hanging indents, spacing and line
-  spacing (lines laid out as Word sets them, the line gap above the text, space before kept only at the top of the
+  spacing (lines as tall as the face's `hhea` metrics, space before kept only at the top of the
   document's first page), widow and orphan control (on unless a paragraph turns it off, as in
   Word), keep lines together, drop caps (dropped or in the margin, the paragraph after wrapping
   beside them), left,
@@ -76,10 +76,15 @@ it works in the browser build too. The source file is only read.
   accents, limits; display equations centred), shapes, groups, drawing canvases and text boxes
   drawn where they are with their fill, outline and text (rotated too, vertical text turned), text
   boxes saved only as VML drawn in place too (their fill, outline, position and insets), SmartArt
-  drawn from the drawing Word saves with it, and tracked changes printed as the final text (insertions kept, deletions and moves away left
+  drawn from the drawing Word saves with it, right-to-left paragraphs filled from the right in
+  reading order with numbers in right-to-left text kept in place and reading left to right, and
+  tracked changes printed as the final text (insertions kept, deletions and moves away left
   out). Links: hyperlinks to addresses (web, mail and FTP only) and to bookmarks, table-of-contents
   entries and `REF`/`PAGEREF` cross-references with `\h` are clickable, and headings (paragraphs
-  with an outline level) become the PDF's bookmarks.
+  with an outline level) become the PDF's bookmarks. Fonts the document embeds (`fontTable.xml`,
+  obfuscated as Word saves them) are used for their runs when their licence allows embedding
+  (not restricted or bitmap-only) and they are TrueType; they are kept for the process, up to
+  64 MiB.
 - **PowerPoint:** one page per visible slide at the slide size; backgrounds (solid, gradient as one
   colour, picture); master and layout decorations; placeholder geometry and text styles inherited
   from the layout and master (`titleStyle`, `bodyStyle`, list styles); theme colours with
@@ -137,9 +142,19 @@ it works in the browser build too. The source file is only read.
 Content-specific approximations are counted in the report (`notes`); automation's `notice` also
 states the standard-font substitution. Nothing in the source is changed.
 
-- **Fonts:** text is set in the standard PDF faces (Helvetica, Times, Courier and their bold and
+- **Fonts:** built with the craft-fonts build input (`CRAFT_FONTS_DIR`, as releases are), Calibri,
+  Cambria, Arial, Times New Roman and Courier New are set in their metric-compatible open faces,
+  Carlito, Caladea and Liberation Sans, Serif and Mono, embedded as subsets (and Georgia, Segoe UI
+  and Arial Narrow in Gelasio, Selawik and Liberation Sans Narrow once craft-fonts carries them;
+  it doesn't yet, so these use the standard faces for now): the advance widths
+  and line heights are Office's, so lines and pages break where Office breaks them. Characters
+  those faces lack are drawn from craft-fonts' Japanese, Chinese, Korean and symbol faces, and
+  Arabic and Hebrew are shaped (HarfRust) in its Arabic and Hebrew faces and set right to left;
+  all of it stays searchable through `/ToUnicode` maps. Other fonts (Aptos, Segoe, Verdana…),
+  builds without craft-fonts, the web build (it leaves these faces out for size) and
+  `OfficeOptions { embed_fonts: false }` use the standard PDF faces (Helvetica, Times, Courier and their bold and
   italic styles), chosen from each run's font family: Calibri, Arial, Aptos → Helvetica;
-  Cambria, Georgia, Times New Roman → Times; Consolas, Courier New → Courier. No font program is
+  Cambria, Georgia, Times New Roman → Times; Consolas, Courier New → Courier. Then no font program is
   embedded, so the PDF stays small and searchable, but line breaks can differ from Office's.
   Beyond WinAnsi, the Turkish, Central European, Baltic and Romanian letters (ğ ı İ ş, ą ć ę ł ń
   ś ź ż, č ř ů, ő ű, ā ē ī ū, ș ț…) are drawn from the same faces through a second encoding with a
@@ -147,7 +162,11 @@ states the standard-font substitution. Nothing in the source is changed.
   are not among them: viewers that stand in for the standard faces (PdfCraft's renderer included)
   build accented letters from a base letter and a plain accent and can't build these. They, and
   everything the faces can't draw at all (Greek, Cyrillic, CJK, Arabic, emoji…), are written as
-  `[U+XXXX]` and counted; they are never replaced by `?`. Embedding real faces would cover them.
+  `[U+XXXX]` and counted; they are never replaced by `?`. With the embedded faces only what no
+  face draws (emoji, Devanagari, Thai) is written so. A right-to-left paragraph (`w:bidi`) is
+  broken into lines in reading order and each line set from the right, left-to-right runs kept in
+  their order and numbers between right-to-left words kept between them; the rest of the
+  bidirectional algorithm (nested embeddings, explicit direction marks) is not applied.
 - **Not drawn, shown as outlined boxes:** SmartArt saved without its drawing, embedded objects
   without an EMF, WMF or bitmap preview, and pictures in a format PdfCraft can't decode (SVG) or
   linked rather than embedded. EMF pictures are played as vectors (pens, brushes, fonts,
@@ -157,8 +176,8 @@ states the standard-font substitution. Nothing in the source is changed.
   clipping regions and arcs are skipped.
 - **Simplified:** gradients use their middle colour; arcs in custom shapes are drawn straight;
   preset shapes without a specific outline use their bounding rectangle; vertical text in
-  PowerPoint text boxes is drawn horizontally; equations are set in the serif standard face
-  (Times) rather than Cambria Math; charts are drawn
+  PowerPoint text boxes is drawn horizontally; equations are set in Caladea (Times without
+  craft-fonts) rather than Cambria Math, as craft-fonts has no maths face; charts are drawn
   flat (3-D charts too) with Office's default look where the chart doesn't style itself; a rich
   text cell's lines are broken and spaced by its largest font; tables don't wrap around
   floating pictures (they start below one); turned table cells don't split across pages; Excel's
@@ -174,7 +193,7 @@ states the standard-font substitution. Nothing in the source is changed.
     curved and bent connectors are drawn as boxes; Wingdings bullets show as the letters they are
     stored as; text in a flipped shape is flipped with it; placeholders inherit no fill or
     outline from the layout or master.
-  - Excel: a number that just fits its column in Calibri can be shown
+  - Excel: without the embedded faces, a number that just fits its column in Calibri can be shown
     as `####`, as Helvetica is wider; formula rules and unsaved formulas using functions or
     references outside the list above (other sheets, names, arrays) are left out and reported;
     a 45° turned cell's borders aren't slanted as Excel slants them; comments shown on the sheet (`cellComments="asDisplayed"`) are left out
@@ -210,11 +229,11 @@ footers, print titles and areas, conditional formatting with formula rules, rota
 rich cell text, format colours, ISO dates, comments at the end, radar and surface charts, sheet
 pictures and shapes, links and bookmarks, widows, orphans and kept lines, page colour, borders,
 line numbers and drop caps, tables floating in the text, tracked changes, VML boxes, turned text,
-Excel formatted tables, patterns, diagonal and double borders,
+fonts embedded in a Word file, Excel formatted tables, patterns, diagonal and double borders,
 shrink, fill and distributed text, merged edges, unsaved formulas, own first page numbers, sheet
 groups, sparklines and charts with two axes, trendlines and labels, and hostile input (`emf.rs`,
 `wmf.rs`, `math.rs`, `xlsx_formula.rs`,
-`xlsx_hf.rs`, `xlsx_cf.rs` and `flow.rs` have their own unit tests, hostile metafiles, equations
-and formulas included).
+`xlsx_hf.rs`, `xlsx_cf.rs`, `faces.rs` and `flow.rs` have their own unit tests, hostile
+metafiles, equations and formulas and right-to-left lines included).
 `crates/automation/tests/it/automation.rs::creating_pdfs_from_word_and_powerpoint_natively` exports a
 PDF to `.docx` and `.pptx` with PdfCraft's own exporter and imports them back through `doc_create`.

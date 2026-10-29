@@ -150,6 +150,7 @@ fn sections(src: &str, base: &RunStyle, vars: &Vars<'_>, pictures: &Pictures, pl
                 let (name, kind) = spec.split_once(',').unwrap_or((spec.as_str(), ""));
                 if name.trim() != "-" && !name.trim().is_empty() {
                     style.fam = family_of(name);
+                    style.font = super::faces::face_of(name);
                 }
                 let kind = kind.to_ascii_lowercase();
                 if !kind.is_empty() {

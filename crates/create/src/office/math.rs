@@ -1,12 +1,13 @@
 //! Office Math (OMML, ECMA-376 Part 1 §22.1) laid out as boxes: fractions, superscripts and
 //! subscripts, radicals, n-ary operators with their limits, delimiters that grow with their
 //! content, matrices, accents and bars, function names, lower and upper limits and equation
-//! arrays. Letters are italic and other characters upright, in the serif standard face. Other
-//! constructs show their content in a row.
+//! arrays. Letters are italic and other characters upright, in Cambria Math's metric twin when
+//! it is embedded. Other constructs show their content in a row.
 
 use roxmltree::Node;
 
 use super::canvas::{Page, n};
+use super::faces::Face;
 use super::flow::fin;
 use super::xml::{attr, child, children, is};
 use super::{Fam, Notes, RunStyle};
@@ -77,7 +78,7 @@ struct Ctx<'n> {
 }
 
 fn style(size: f64, italic: bool, color: [f64; 3]) -> RunStyle {
-    RunStyle { fam: Fam::Serif, size, italic, color, ..RunStyle::default() }
+    RunStyle { fam: Fam::Serif, font: Face::Caladea, size, italic, color, ..RunStyle::default() }
 }
 
 fn text_box(s: &str, st: RunStyle) -> MathBox {

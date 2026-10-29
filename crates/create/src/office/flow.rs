@@ -225,7 +225,7 @@ pub(crate) struct Para {
     /// Bookmarks (named places) that start in the paragraph, for links to go to.
     pub anchors: Vec<String>,
     /// A right-to-left paragraph: its lines read from the right, the first words on the first
-    /// line (right-to-left runs already in visual order).
+    /// line (its text is already in visual order, see [`super::faces::shape_rtl`]).
     pub rtl: bool,
 }
 
@@ -489,13 +489,8 @@ fn atoms(p: &Para, fields: (usize, usize), styles: &mut Vec<RunStyle>) -> (Vec<A
     (out, srcs)
 }
 
-/// Whether `c` is right-to-left text: Arabic or Hebrew.
-fn is_rtl(c: char) -> bool {
-    matches!(u32::from(c), 0x0590..=0x05FF | 0x0600..=0x06FF | 0x0750..=0x077F | 0x08A0..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF)
-}
-
 fn rtl_word(a: &Atom) -> bool {
-    matches!(a, Atom::Word(pieces) if pieces.iter().any(|(t, _)| t.chars().any(is_rtl)))
+    matches!(a, Atom::Word(pieces) if pieces.iter().any(|(t, _)| t.chars().any(super::faces::is_rtl)))
 }
 
 /// Turn each run of right-to-left words (with the spaces between them) of one text item back
@@ -538,7 +533,7 @@ fn mirror_line(items: &mut [(f64, Placed)], styles: &[RunStyle], left: f64, righ
     }
     // Left-to-right runs: text with letters or digits and none right-to-left, with the spaces
     // between them, mirrored back within the room they take.
-    let ltr = |p: &Placed| matches!(p, Placed::Text(t, _) if t.chars().any(char::is_alphanumeric) && !t.chars().any(is_rtl));
+    let ltr = |p: &Placed| matches!(p, Placed::Text(t, _) if t.chars().any(char::is_alphanumeric) && !t.chars().any(super::faces::is_rtl));
     let blank = |p: &Placed| matches!(p, Placed::Text(t, _) if t.trim().is_empty());
     let mut i = 0usize;
     while i < items.len() {

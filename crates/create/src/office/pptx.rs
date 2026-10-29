@@ -854,6 +854,7 @@ fn text_body(
             let size = fin(l.size.unwrap_or(18.0) * scale, 18.0).clamp(1.0, 400.0);
             RunStyle {
                 fam: family_of(&l.font.clone().unwrap_or_else(|| c.minor.clone())),
+                font: super::faces::face_of(&l.font.clone().unwrap_or_else(|| c.minor.clone())),
                 bold: l.bold.unwrap_or(false),
                 italic: l.italic.unwrap_or(false),
                 size,
@@ -1300,6 +1301,7 @@ fn cell_text(
             }
             let rs = RunStyle {
                 fam: family_of(&rl.font.clone().unwrap_or_else(|| c.minor.clone())),
+                font: super::faces::face_of(&rl.font.clone().unwrap_or_else(|| c.minor.clone())),
                 bold: rl.bold.unwrap_or(bold),
                 italic: rl.italic.unwrap_or(false),
                 size: fin(rl.size.unwrap_or(18.0), 18.0).clamp(1.0, 400.0),
@@ -1505,5 +1507,6 @@ pub(crate) fn convert(zip: &Zip<'_>, main: &str, doc: &mut Document, notes: &mut
             shapes(&mut cx, page, tree, srels, Xf::ID, &space, &inh, &colors, false, 0);
         }
     }
+    cx.notes.fonts = canvas.embedded_faces();
     canvas.finish(cx.doc).map_err(|e| e.to_string())
 }

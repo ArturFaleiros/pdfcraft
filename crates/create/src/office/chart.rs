@@ -3,12 +3,13 @@
 //! and area charts, pie and doughnut charts, and scatter charts, with the title, the value and
 //! category axes (unless deleted), major gridlines, the legend and pie percentages. Colours come
 //! from each series' or point's fill, else the theme's accent colours in Office's order. 3-D
-//! charts are drawn flat. Text is set like the rest of the import, sizes as Office's defaults
-//! unless the chart sets them.
+//! charts are drawn flat. Text is set like the rest of the import (Calibri's metric twin when
+//! embedded), sizes as Office's defaults unless the chart sets them.
 
 use roxmltree::Node;
 
 use super::canvas::{Page, n};
+use super::faces::Face;
 use super::xml::{self, attr, attr_f64, child, children, is};
 use super::zip::Zip;
 use super::{Fam, Notes, RunStyle};
@@ -294,7 +295,7 @@ pub(crate) fn read(zip: &Zip<'_>, part: &str, accents: &[[f64; 3]], notes: &mut 
 }
 
 fn style(size: f64, color: [f64; 3]) -> RunStyle {
-    RunStyle { fam: Fam::Sans, size, color, ..RunStyle::default() }
+    RunStyle { fam: Fam::Sans, font: Face::Carlito, size, color, ..RunStyle::default() }
 }
 
 /// A rounded axis: step, lowest and highest gridline for values `lo..hi`.

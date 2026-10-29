@@ -14,10 +14,12 @@ mod canvas;
 mod chart;
 mod docx;
 mod emf;
+mod faces;
 mod flow;
 mod latin;
 mod math;
 mod pptx;
+mod ttf;
 mod wmf;
 mod xlsx;
 mod xlsx_cf;
@@ -66,12 +68,32 @@ pub struct OfficeReport {
     pub escaped: usize,
     /// One line per kind of content that was approximated or left out, with how many.
     pub notes: Vec<String>,
+    /// How many metric-compatible faces (Carlito, Caladea, Liberation) were embedded; 0 when
+    /// text is set in the standard PDF faces only.
+    pub fonts_embedded: usize,
+}
+
+/// How [`from_office_with`] converts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OfficeOptions {
+    /// Embed the metric-compatible faces of the craft-fonts build input for Calibri, Cambria,
+    /// Arial, Times New Roman and Courier New (when the build has them). Off sets every run in
+    /// the standard PDF faces.
+    pub embed_fonts: bool,
+}
+
+impl Default for OfficeOptions {
+    fn default() -> Self {
+        OfficeOptions { embed_fonts: true }
+    }
 }
 
 /// Tallies of approximations, turned into [`OfficeReport::notes`].
 #[derive(Default)]
 pub(crate) struct Notes {
     escaped: usize,
+    /// Embedded faces, set by the converter from its canvas.
+    pub(crate) fonts: usize,
     counts: Vec<(&'static str, usize)>,
 }
 
@@ -88,14 +110,25 @@ impl Notes {
         if self.escaped > 0 {
             notes.insert(0, format!("characters the built-in fonts can't draw, written as [U+XXXX]: {}", self.escaped));
         }
-        OfficeReport { kind, pages, escaped: self.escaped, notes }
+        OfficeReport { kind, pages, escaped: self.escaped, notes, fonts_embedded: self.fonts }
     }
 
     /// `s` with every character the standard fonts can't draw written as `[U+XXXX]`, symbol-font
     /// private-use bullets mapped to their usual shapes, and invisible format characters dropped.
     pub(crate) fn drawable(&mut self, s: &str) -> String {
+        // Arabic and Hebrew are shaped and set right to left first, when craft-fonts has them.
+        let s = faces::shape_rtl(s);
         let mut out = String::with_capacity(s.len());
         for c in s.chars() {
+            // An embedded face draws the character itself (a true minus, say): keep it.
+            if !c.is_ascii()
+                && !c.is_control()
+                && faces::everyone_draws(c)
+                && !matches!(c, '\u{00AD}' | '\u{200B}'..='\u{200F}' | '\u{2060}' | '\u{FEFF}' | '\u{F000}'..='\u{F0FF}')
+            {
+                out.push(c);
+                continue;
+            }
             let c = match c {
                 // Zero-width and soft-hyphen characters draw nothing.
                 '\u{00AD}' | '\u{200B}'..='\u{200F}' | '\u{2060}' | '\u{FEFF}' => continue,
@@ -118,7 +151,7 @@ impl Notes {
                 '\u{2713}' | '\u{2714}' => 'x',
                 c => c,
             };
-            if pdfcraft_fonts::win_ansi_byte(c).is_some() || c == ' ' || latin::code(c).is_some() {
+            if pdfcraft_fonts::win_ansi_byte(c).is_some() || c == ' ' || latin::code(c).is_some() || faces::everyone_draws(c) {
                 out.push(c);
             } else if c.is_control() {
                 // Other control characters carry no ink.
@@ -211,6 +244,8 @@ pub(crate) struct RunStyle {
     pub vert: i8,
     pub caps: bool,
     pub hidden: bool,
+    /// The metric-compatible face embedded for the run's font, when craft-fonts has it.
+    pub font: faces::Face,
     /// The link the run is part of: its text becomes a clickable area.
     pub link: Option<std::sync::Arc<LinkTarget>>,
 }
@@ -229,6 +264,7 @@ impl Default for RunStyle {
             vert: 0,
             caps: false,
             hidden: false,
+            font: faces::Face::Std,
             link: None,
         }
     }
@@ -258,20 +294,45 @@ impl RunStyle {
         if s.is_finite() { s.clamp(1.0, 400.0) } else { 11.0 }
     }
 
-    /// Width of already-drawable text in points.
+    /// Width of already-drawable text in points: in the embedded face when there is one,
+    /// else in the standard face (characters it lacks in its embedded stand-in).
     pub(crate) fn width(&self, s: &str) -> f64 {
-        let face = self.face();
         let size = self.draw_size();
-        if s.chars().all(|c| latin::code(c).is_none()) {
+        if let Some((_, l)) = faces::loaded(self.font, self.bold, self.italic) {
+            let space = l.glyph(' ').map_or(250.0, |g| g.1);
+            return s
+                .chars()
+                .map(|c| {
+                    let c = if c == '\t' { ' ' } else { c };
+                    l.glyph(c).or_else(|| faces::script_fallback(c).and_then(|(_, f)| f.glyph(c))).map_or(space, |g| g.1)
+                })
+                .sum::<f64>()
+                * size
+                / 1000.0;
+        }
+        let face = self.face();
+        if s.chars().all(|c| latin::code(c).is_none() && (c.is_ascii() || pdfcraft_fonts::win_ansi_byte(c).is_some())) {
             return face.text_width(s, size);
         }
-        face.text_width(&s.chars().map(latin::measured_as).collect::<String>(), size)
+        let fallback = faces::fallback(self.fam, self.bold, self.italic).map(|(_, l)| l);
+        s.chars()
+            .map(|c| {
+                if pdfcraft_fonts::win_ansi_byte(c).is_some() || c == '\t' || latin::code(c).is_some() {
+                    face.text_width(&latin::measured_as(c).to_string(), size)
+                } else {
+                    fallback
+                        .and_then(|l| l.glyph(c))
+                        .or_else(|| faces::script_fallback(c).and_then(|(_, f)| f.glyph(c)))
+                        .map_or_else(|| face.text_width("?", size), |g| g.1 * size / 1000.0)
+                }
+            })
+            .sum()
     }
 
-    /// The line's ascent, descent and gap per point of size: the standard faces' (Helvetica's)
-    /// proportions, with the gap above the text as Word lays out lines.
+    /// The line's ascent, descent and gap per point of size: the embedded face's `hhea`
+    /// metrics, or the standard faces' (Helvetica's) proportions.
     pub(crate) fn line_metrics(&self) -> (f64, f64, f64) {
-        (0.905, 0.212, 0.033)
+        faces::loaded(self.font, self.bold, self.italic).map_or((0.905, 0.212, 0.033), |(_, l)| l.line)
     }
 }
 
@@ -308,6 +369,15 @@ fn detect(zip: &zip::Zip<'_>) -> Result<(OfficeKind, String), String> {
 /// Convert a Word, PowerPoint or Excel (Office Open XML) file to a new PDF. `name` is used for
 /// messages and the document title. Returns the document and what could not be carried over.
 pub fn from_office(name: &str, bytes: &[u8]) -> Result<(Document, OfficeReport), CreateError> {
+    from_office_with(name, bytes, OfficeOptions::default())
+}
+
+/// [`from_office`] with options.
+pub fn from_office_with(name: &str, bytes: &[u8], options: OfficeOptions) -> Result<(Document, OfficeReport), CreateError> {
+    faces::standard_fonts_only(!options.embed_fonts, || convert_office(name, bytes))
+}
+
+fn convert_office(name: &str, bytes: &[u8]) -> Result<(Document, OfficeReport), CreateError> {
     let fail = |m: String| CreateError::Image(name.to_string(), m);
     let zip = zip::Zip::open(bytes).map_err(fail)?;
     let (kind, main) = detect(&zip).map_err(fail)?;
@@ -326,7 +396,11 @@ pub fn from_office(name: &str, bytes: &[u8]) -> Result<(Document, OfficeReport),
 impl OfficeReport {
     /// Font substitutions can change pagination even when no content-specific note is needed.
     pub fn notice(&self) -> String {
-        let mut notice = "Office import uses standard PDF fonts; layout may differ. Review the converted pages.".to_owned();
+        let mut notice = if self.fonts_embedded > 0 {
+            "Office import sets Calibri, Cambria, Arial, Times New Roman and Courier New in metric-compatible open faces; other fonts use standard PDF fonts, so layout may differ. Review the converted pages.".to_owned()
+        } else {
+            "Office import uses standard PDF fonts; layout may differ. Review the converted pages.".to_owned()
+        };
         if !self.notes.is_empty() {
             notice.push(' ');
             notice.push_str(&self.notes.join("; "));
