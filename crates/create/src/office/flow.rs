@@ -272,18 +272,12 @@ pub(crate) fn layout(p: &Para, width: f64, fields: (usize, usize)) -> Laid {
         cur.after_tab = cur.items.len();
     }
 
-    let new_line = |lines: &mut Vec<Building>, cur: &mut Building, forced: bool| {
-        cur.forced = forced;
-        let done = std::mem::replace(cur, Building::new(left));
-        lines.push(done);
-    };
-
     for atom in atoms {
         if lines.len() >= MAX_LINES {
             break;
         }
         match atom {
-            Atom::Break => new_line(&mut lines, &mut cur, true),
+            Atom::Break => new_line(&mut lines, &mut cur, true, left),
             Atom::Space(s, si) => {
                 let Some(st) = styles.get(si) else { continue };
                 let w = st.width(&s);
@@ -295,7 +289,7 @@ pub(crate) fn layout(p: &Para, width: f64, fields: (usize, usize)) -> Laid {
                 let next = stops.iter().copied().find(|t| *t > cur.x + 0.5).unwrap_or_else(|| ((cur.x / DEFAULT_TAB).floor() + 1.0) * DEFAULT_TAB);
                 if next > right_edge {
                     // Past the right edge a tab moves to the next line, as Word does.
-                    new_line(&mut lines, &mut cur, false);
+                    new_line(&mut lines, &mut cur, false, left);
                 } else {
                     cur.x = next;
                 }
@@ -304,7 +298,7 @@ pub(crate) fn layout(p: &Para, width: f64, fields: (usize, usize)) -> Laid {
             }
             Atom::Image(r, w, h) => {
                 if cur.x + w > right_edge && cur.has_ink() {
-                    new_line(&mut lines, &mut cur, false);
+                    new_line(&mut lines, &mut cur, false, left);
                 }
                 // An image wider than the line is scaled to fit it.
                 let k = if w > right_edge - cur.x && right_edge - cur.x > 1.0 { (right_edge - cur.x) / w } else { 1.0 };
@@ -315,7 +309,7 @@ pub(crate) fn layout(p: &Para, width: f64, fields: (usize, usize)) -> Laid {
             Atom::Word(pieces) => {
                 let w: f64 = pieces.iter().map(|(t, si)| styles.get(*si).map_or(0.0, |s| s.width(t))).sum();
                 if cur.x + w > right_edge + 0.01 && cur.has_ink() {
-                    new_line(&mut lines, &mut cur, false);
+                    new_line(&mut lines, &mut cur, false, left);
                     // Leading spaces of a wrapped line are not drawn.
                 }
                 if cur.x + w <= right_edge + 0.01 || w <= 0.0 {
@@ -327,34 +321,7 @@ pub(crate) fn layout(p: &Para, width: f64, fields: (usize, usize)) -> Laid {
                     cur.ink = cur.x;
                 } else {
                     // A word longer than the whole line is broken between characters.
-                    for (t, si) in pieces {
-                        let Some(st) = styles.get(si).cloned() else { continue };
-                        let mut chunk = String::new();
-                        // The chunk's width, kept as it grows: re-measuring would be quadratic.
-                        let mut chunk_w = 0.0;
-                        for c in t.chars() {
-                            let cw = st.width(c.encode_utf8(&mut [0; 4]));
-                            if cur.x + chunk_w + cw > right_edge && (!chunk.is_empty() || cur.has_ink()) {
-                                if !chunk.is_empty() {
-                                    cur.items.push((cur.x, Placed::Text(std::mem::take(&mut chunk), si)));
-                                    cur.x += chunk_w;
-                                    cur.ink = cur.x;
-                                    chunk_w = 0.0;
-                                }
-                                new_line(&mut lines, &mut cur, false);
-                                if lines.len() >= MAX_LINES {
-                                    break;
-                                }
-                            }
-                            chunk.push(c);
-                            chunk_w += cw;
-                        }
-                        if !chunk.is_empty() {
-                            cur.items.push((cur.x, Placed::Text(chunk, si)));
-                            cur.x += chunk_w;
-                            cur.ink = cur.x;
-                        }
-                    }
+                    break_word(pieces, &styles, &mut lines, &mut cur, (left, right_edge));
                 }
             }
         }
@@ -364,82 +331,9 @@ pub(crate) fn layout(p: &Para, width: f64, fields: (usize, usize)) -> Laid {
 
     let count = lines.len();
     let mut out = Vec::with_capacity(count);
-    for (i, mut b) in lines.into_iter().enumerate() {
+    for (i, b) in lines.into_iter().enumerate() {
         let last = i + 1 == count || b.forced;
-        // Spaces at the start of a wrapped line and at the end of any line carry no ink.
-        if i > 0 && !b.forced {
-            while matches!(b.items.first(), Some((_, Placed::Text(t, _))) if t.trim().is_empty()) {
-                b.items.remove(0);
-                b.spaces.retain(|s| *s != 0);
-                b.spaces.iter_mut().for_each(|s| *s = s.saturating_sub(1));
-                b.after_tab = b.after_tab.saturating_sub(1);
-                if let Some((x0, _)) = b.items.first() {
-                    let shift = x0 - b.start;
-                    b.items.iter_mut().for_each(|(x, _)| *x -= shift);
-                    b.ink -= shift;
-                }
-            }
-        }
-        let trailing = b.items.iter().rposition(|(_, p)| !matches!(p, Placed::Text(t, _) if t.trim().is_empty())).map_or(0, |i| i + 1);
-        b.items.truncate(trailing);
-        b.spaces.retain(|s| *s < trailing);
-        let free = right_edge - b.ink;
-        let tail = b.after_tab.min(b.items.len());
-        match p.align {
-            Align::Center if free > 0.0 => b.items.iter_mut().skip(tail).for_each(|(x, _)| *x += free / 2.0),
-            Align::Right if free > 0.0 => b.items.iter_mut().skip(tail).for_each(|(x, _)| *x += free),
-            Align::Justify if free > 0.0 && !last => {
-                let spaces: Vec<usize> = b.spaces.iter().copied().filter(|s| *s >= tail).collect();
-                if !spaces.is_empty() {
-                    let extra = free / spaces.len() as f64;
-                    let mut shift = 0.0;
-                    for (i, (x, _)) in b.items.iter_mut().enumerate() {
-                        *x += shift;
-                        if spaces.contains(&i) {
-                            shift += extra;
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-        let (mut asc, mut desc, mut gap) = (0.0f64, 0.0f64, 0.0f64);
-        for (_, item) in &b.items {
-            match item {
-                Placed::Text(_, si) => {
-                    if let Some(s) = styles.get(*si) {
-                        asc = asc.max(s.size * 0.905);
-                        desc = desc.max(s.size * 0.212);
-                        gap = gap.max(s.size * 0.033);
-                    }
-                }
-                Placed::Image(_, _, h) => asc = asc.max(*h),
-            }
-        }
-        if asc <= 0.0 {
-            // An empty line is as tall as the paragraph mark's font.
-            let s = &p.base;
-            asc = s.size * 0.905;
-            desc = s.size * 0.212;
-            gap = s.size * 0.033;
-        }
-        let natural = asc + desc + gap;
-        let (height, baseline) = match p.line {
-            LineRule::Auto(m) => {
-                let m = if m.is_finite() { m.clamp(0.25, 10.0) } else { 1.0 };
-                let h = natural * m;
-                (h, h - desc - gap)
-            }
-            LineRule::Exact(v) => {
-                let v = if v.is_finite() { v.clamp(0.5, 2000.0) } else { natural };
-                (v, (v * 0.8).min(v - desc * 0.5).max(0.0))
-            }
-            LineRule::AtLeast(v) => {
-                let h = if v.is_finite() { natural.max(v) } else { natural };
-                (h, h - desc - gap)
-            }
-        };
-        out.push(Line { items: b.items, height, baseline });
+        out.push(finish_line(p, &styles, right_edge, b, (i > 0, last)));
     }
     Laid {
         lines: out,
@@ -451,6 +345,125 @@ pub(crate) fn layout(p: &Para, width: f64, fields: (usize, usize)) -> Laid {
         left,
         right: right_edge,
     }
+}
+
+/// End the line being built and start a new one at the paragraph's left indent.
+fn new_line(lines: &mut Vec<Building>, cur: &mut Building, forced: bool, left: f64) {
+    cur.forced = forced;
+    let done = std::mem::replace(cur, Building::new(left));
+    lines.push(done);
+}
+
+/// Break a word longer than the whole line between characters; `(left, right_edge)` bound the
+/// lines it continues on.
+fn break_word(pieces: Vec<(String, usize)>, styles: &[RunStyle], lines: &mut Vec<Building>, cur: &mut Building, (left, right_edge): (f64, f64)) {
+    for (t, si) in pieces {
+        let Some(st) = styles.get(si).cloned() else { continue };
+        let mut chunk = String::new();
+        // The chunk's width, kept as it grows: re-measuring would be quadratic.
+        let mut chunk_w = 0.0;
+        for c in t.chars() {
+            let cw = st.width(c.encode_utf8(&mut [0; 4]));
+            if cur.x + chunk_w + cw > right_edge && (!chunk.is_empty() || cur.has_ink()) {
+                if !chunk.is_empty() {
+                    cur.items.push((cur.x, Placed::Text(std::mem::take(&mut chunk), si)));
+                    cur.x += chunk_w;
+                    cur.ink = cur.x;
+                    chunk_w = 0.0;
+                }
+                new_line(lines, cur, false, left);
+                if lines.len() >= MAX_LINES {
+                    break;
+                }
+            }
+            chunk.push(c);
+            chunk_w += cw;
+        }
+        if !chunk.is_empty() {
+            cur.items.push((cur.x, Placed::Text(chunk, si)));
+            cur.x += chunk_w;
+            cur.ink = cur.x;
+        }
+    }
+}
+
+/// Trim, align and measure one built line; `wrapped` is false for the paragraph's first line and
+/// `last` is true for its last line or one ended by a break.
+fn finish_line(p: &Para, styles: &[RunStyle], right_edge: f64, mut b: Building, (wrapped, last): (bool, bool)) -> Line {
+    // Spaces at the start of a wrapped line and at the end of any line carry no ink.
+    if wrapped && !b.forced {
+        while matches!(b.items.first(), Some((_, Placed::Text(t, _))) if t.trim().is_empty()) {
+            b.items.remove(0);
+            b.spaces.retain(|s| *s != 0);
+            b.spaces.iter_mut().for_each(|s| *s = s.saturating_sub(1));
+            b.after_tab = b.after_tab.saturating_sub(1);
+            if let Some((x0, _)) = b.items.first() {
+                let shift = x0 - b.start;
+                b.items.iter_mut().for_each(|(x, _)| *x -= shift);
+                b.ink -= shift;
+            }
+        }
+    }
+    let trailing = b.items.iter().rposition(|(_, p)| !matches!(p, Placed::Text(t, _) if t.trim().is_empty())).map_or(0, |i| i + 1);
+    b.items.truncate(trailing);
+    b.spaces.retain(|s| *s < trailing);
+    let free = right_edge - b.ink;
+    let tail = b.after_tab.min(b.items.len());
+    match p.align {
+        Align::Center if free > 0.0 => b.items.iter_mut().skip(tail).for_each(|(x, _)| *x += free / 2.0),
+        Align::Right if free > 0.0 => b.items.iter_mut().skip(tail).for_each(|(x, _)| *x += free),
+        Align::Justify if free > 0.0 && !last => {
+            let spaces: Vec<usize> = b.spaces.iter().copied().filter(|s| *s >= tail).collect();
+            if !spaces.is_empty() {
+                let extra = free / spaces.len() as f64;
+                let mut shift = 0.0;
+                for (i, (x, _)) in b.items.iter_mut().enumerate() {
+                    *x += shift;
+                    if spaces.contains(&i) {
+                        shift += extra;
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    let (mut asc, mut desc, mut gap) = (0.0f64, 0.0f64, 0.0f64);
+    for (_, item) in &b.items {
+        match item {
+            Placed::Text(_, si) => {
+                if let Some(s) = styles.get(*si) {
+                    asc = asc.max(s.size * 0.905);
+                    desc = desc.max(s.size * 0.212);
+                    gap = gap.max(s.size * 0.033);
+                }
+            }
+            Placed::Image(_, _, h) => asc = asc.max(*h),
+        }
+    }
+    if asc <= 0.0 {
+        // An empty line is as tall as the paragraph mark's font.
+        let s = &p.base;
+        asc = s.size * 0.905;
+        desc = s.size * 0.212;
+        gap = s.size * 0.033;
+    }
+    let natural = asc + desc + gap;
+    let (height, baseline) = match p.line {
+        LineRule::Auto(m) => {
+            let m = if m.is_finite() { m.clamp(0.25, 10.0) } else { 1.0 };
+            let h = natural * m;
+            (h, h - desc - gap)
+        }
+        LineRule::Exact(v) => {
+            let v = if v.is_finite() { v.clamp(0.5, 2000.0) } else { natural };
+            (v, (v * 0.8).min(v - desc * 0.5).max(0.0))
+        }
+        LineRule::AtLeast(v) => {
+            let h = if v.is_finite() { natural.max(v) } else { natural };
+            (h, h - desc - gap)
+        }
+    };
+    Line { items: b.items, height, baseline }
 }
 
 /// Draw one line whose top is at PDF `y_top`, in a text area starting at PDF `x0`.

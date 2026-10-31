@@ -782,6 +782,41 @@ fn roman(mut n: i64) -> String {
     s
 }
 
+/// A paragraph's bullet or list number at level `lvl`, advancing the per-level `counters`.
+fn bullet_label(
+    notes: &mut Notes,
+    style: &Lvl,
+    base: &RunStyle,
+    has_text: bool,
+    lvl: usize,
+    counters: &mut [Option<i64>; 9],
+) -> Option<(String, RunStyle)> {
+    // Bullets show only on paragraphs with text.
+    match &style.bullet {
+        Some(Bullet::Char(ch)) if has_text => {
+            counters.iter_mut().skip(lvl).for_each(|c| *c = None);
+            let mut bs = base.clone();
+            if let Some(bc) = style.bullet_color {
+                bs.color = bc;
+            }
+            Some((notes.drawable(ch), bs))
+        }
+        Some(Bullet::Auto(ty, start)) if has_text => {
+            let slot = counters.get_mut(lvl);
+            let v = match slot {
+                Some(Some(v)) => v.saturating_add(1),
+                _ => *start,
+            };
+            if let Some(s) = counters.get_mut(lvl) {
+                *s = Some(v);
+            }
+            counters.iter_mut().skip(lvl + 1).for_each(|c| *c = None);
+            Some((auto_label(ty, v), base.clone()))
+        }
+        _ => None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn text_body(
     cx: &mut Cx<'_, '_>,
@@ -899,30 +934,7 @@ fn text_body(
                 _ => {}
             }
         }
-        // Bullets show only on paragraphs with text.
-        let label = match &style.bullet {
-            Some(Bullet::Char(ch)) if has_text => {
-                counters.iter_mut().skip(lvl).for_each(|c| *c = None);
-                let mut bs = base.clone();
-                if let Some(bc) = style.bullet_color {
-                    bs.color = bc;
-                }
-                Some((cx.notes.drawable(ch), bs))
-            }
-            Some(Bullet::Auto(ty, start)) if has_text => {
-                let slot = counters.get_mut(lvl);
-                let v = match slot {
-                    Some(Some(v)) => v.saturating_add(1),
-                    _ => *start,
-                };
-                if let Some(s) = counters.get_mut(lvl) {
-                    *s = Some(v);
-                }
-                counters.iter_mut().skip(lvl + 1).for_each(|c| *c = None);
-                Some((auto_label(ty, v), base.clone()))
-            }
-            _ => None,
-        };
+        let label = bullet_label(cx.notes, &style, &base, has_text, lvl, &mut counters);
         let size = base.size;
         let spacing = |s: Option<Spacing>| match s {
             Some(Spacing::Points(p)) => p,
@@ -1085,28 +1097,7 @@ fn shapes(
                             page.stroke_rect(x, ytop - h, w, h, lw, col);
                         }
                     }
-                    "graphicFrame" => {
-                        let data = e.descendants().find(|d| is(*d, "graphicData"));
-                        let uri = data.and_then(|d| attr(d, "uri")).unwrap_or_default();
-                        if let Some(tbl) = data.and_then(|d| child(d, "tbl")) {
-                            table(cx, page, tbl, (x, ytop, w, h), inh, c);
-                        } else if let Some(blip) = data.and_then(|d| d.descendants().find(|b| is(*b, "blip"))) {
-                            let r = rel_attr(blip, "embed").and_then(|id| cx.image(rels, id));
-                            match r {
-                                Some(r) => page.image(r, x, ytop - h, w, h),
-                                None => page.placeholder(x, ytop - h, w, h),
-                            }
-                        } else {
-                            cx.notes.add(if uri.contains("chart") {
-                                "charts, drawn as empty boxes"
-                            } else if uri.contains("diagram") {
-                                "SmartArt diagrams, drawn as empty boxes"
-                            } else {
-                                "embedded objects, drawn as empty boxes"
-                            });
-                            page.placeholder(x, ytop - h, w, h);
-                        }
-                    }
+                    "graphicFrame" => graphic_frame(cx, page, e, rels, (x, ytop, w, h), inh, c),
                     _ => {
                         let st = shape_style(cx, e, sppr, rels, c);
                         let geom = sppr.and_then(|p| child(p, "prstGeom").or_else(|| child(p, "custGeom")));
@@ -1147,6 +1138,38 @@ fn shapes(
             }
             _ => {}
         }
+    }
+}
+
+/// Draw a graphic frame: a table, an embedded picture, or a placeholder box for anything else.
+fn graphic_frame(
+    cx: &mut Cx<'_, '_>,
+    page: &mut Page,
+    e: Node<'_, '_>,
+    rels: &Rels,
+    (x, ytop, w, h): (f64, f64, f64, f64),
+    inh: &Inherit<'_, '_, '_>,
+    c: &Colors,
+) {
+    let data = e.descendants().find(|d| is(*d, "graphicData"));
+    let uri = data.and_then(|d| attr(d, "uri")).unwrap_or_default();
+    if let Some(tbl) = data.and_then(|d| child(d, "tbl")) {
+        table(cx, page, tbl, (x, ytop, w, h), inh, c);
+    } else if let Some(blip) = data.and_then(|d| d.descendants().find(|b| is(*b, "blip"))) {
+        let r = rel_attr(blip, "embed").and_then(|id| cx.image(rels, id));
+        match r {
+            Some(r) => page.image(r, x, ytop - h, w, h),
+            None => page.placeholder(x, ytop - h, w, h),
+        }
+    } else {
+        cx.notes.add(if uri.contains("chart") {
+            "charts, drawn as empty boxes"
+        } else if uri.contains("diagram") {
+            "SmartArt diagrams, drawn as empty boxes"
+        } else {
+            "embedded objects, drawn as empty boxes"
+        });
+        page.placeholder(x, ytop - h, w, h);
     }
 }
 

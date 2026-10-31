@@ -9,7 +9,8 @@ const MAX_NODES: u32 = 8_000_000;
 
 pub(crate) fn parse(text: &str) -> Result<Document<'_>, String> {
     // DTDs stay disallowed (the default): OOXML never uses one, and entities are an expansion risk.
-    Document::parse_with_options(text, ParsingOptions { allow_dtd: false, nodes_limit: MAX_NODES }).map_err(|e| format!("malformed XML ({e})"))
+    Document::parse_with_options(text, ParsingOptions { allow_dtd: false, nodes_limit: MAX_NODES, ..Default::default() })
+        .map_err(|e| format!("malformed XML ({e})"))
 }
 
 pub(crate) fn is(n: Node<'_, '_>, name: &str) -> bool {

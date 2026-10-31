@@ -10,7 +10,7 @@ use chrono::Datelike;
 use pdfcraft_cos::Document;
 use roxmltree::Node;
 
-use super::canvas::Canvas;
+use super::canvas::{Canvas, Page};
 use super::flow::fin;
 use super::xml::{self, Rels, attr, attr_f64, child, children, flag, is, rel_attr};
 use super::zip::Zip;
@@ -391,6 +391,80 @@ struct Section {
     lcid: u32,
 }
 
+/// Whether a format section is a date/time format: date or time letters outside quotes, escapes
+/// and brackets, and no "General".
+fn is_date_format(sec: &str, lower: &[char]) -> bool {
+    let mut date = false;
+    let (mut q, mut b, mut esc) = (false, false, false);
+    for c in lower {
+        match c {
+            _ if esc => esc = false,
+            '\\' if !q => esc = true,
+            '"' => q = !q,
+            '[' if !q => b = true,
+            ']' if !q => b = false,
+            'y' | 'd' | 'h' | 's' | 'm' if !q && !b => date = true,
+            _ => {}
+        }
+    }
+    if sec.to_ascii_lowercase().contains("general") {
+        date = false;
+    }
+    date
+}
+
+impl Section {
+    /// Apply a `[...]` tag's contents: a colour, a currency and locale, or an elapsed-time token.
+    fn bracket_tag(&mut self, tag: &str, lit: &mut String) {
+        let lower = tag.to_ascii_lowercase();
+        if lower == "red" {
+            self.red = true;
+        } else if let Some(rest) = tag.strip_prefix('$') {
+            let (sym, lcid) = rest.split_once('-').unwrap_or((rest, ""));
+            self.lcid = u32::from_str_radix(lcid.trim(), 16).unwrap_or(0);
+            if self.date {
+                if !sym.is_empty() {
+                    self.tokens.push(format!("\"{sym}"));
+                }
+            } else {
+                lit.push_str(sym);
+            }
+        } else if self.date && matches!(lower.as_str(), "h" | "hh" | "m" | "mm" | "s" | "ss") {
+            self.tokens.push(format!("[{lower}]"));
+        }
+    }
+
+    /// Read one date/time token starting with `c`, the character just before `*i` in `chars`
+    /// (`lower` is `chars` lowercased), and advance `*i` past it.
+    fn date_token(&mut self, c: char, (chars, lower): (&[char], &[char]), i: &mut usize) {
+        let starts_at = |at: usize, word: &str| word.chars().enumerate().all(|(k, w)| lower.get(at + k) == Some(&w));
+        let lc = c.to_ascii_lowercase();
+        if matches!(lc, 'y' | 'm' | 'd' | 'h' | 's') {
+            let mut tok = lc.to_string();
+            while chars.get(*i).is_some_and(|n| n.to_ascii_lowercase() == lc) {
+                tok.push(lc);
+                *i += 1;
+            }
+            self.tokens.push(tok);
+        } else if starts_at(i.saturating_sub(1), "am/pm") {
+            self.tokens.push("ampm".into());
+            *i += 4;
+        } else if starts_at(i.saturating_sub(1), "a/p") {
+            self.tokens.push("ap".into());
+            *i += 2;
+        } else if c == '0' {
+            let mut tok = "0".to_string();
+            while chars.get(*i) == Some(&'0') {
+                tok.push('0');
+                *i += 1;
+            }
+            self.tokens.push(tok);
+        } else {
+            self.tokens.push(format!("\"{c}"));
+        }
+    }
+}
+
 fn parse_section(sec: &str) -> Section {
     let mut s = Section::default();
     let mut lit = String::new();
@@ -398,25 +472,7 @@ fn parse_section(sec: &str) -> Section {
     let mut in_dec = false;
     let chars: Vec<char> = sec.chars().collect();
     let lower: Vec<char> = chars.iter().map(char::to_ascii_lowercase).collect();
-    let starts_at = |at: usize, word: &str| word.chars().enumerate().all(|(k, w)| lower.get(at + k) == Some(&w));
-    // A date/time format has date or time letters outside quotes, escapes and brackets.
-    {
-        let (mut q, mut b, mut esc) = (false, false, false);
-        for c in &lower {
-            match c {
-                _ if esc => esc = false,
-                '\\' if !q => esc = true,
-                '"' => q = !q,
-                '[' if !q => b = true,
-                ']' if !q => b = false,
-                'y' | 'd' | 'h' | 's' | 'm' if !q && !b => s.date = true,
-                _ => {}
-            }
-        }
-        if sec.to_ascii_lowercase().contains("general") {
-            s.date = false;
-        }
-    }
+    s.date = is_date_format(sec, &lower);
     let mut i = 0usize;
     let flush = |s: &mut Section, lit: &mut String, seen: bool| {
         if seen {
@@ -471,54 +527,14 @@ fn parse_section(sec: &str) -> Section {
                     }
                     tag.push(q);
                 }
-                let lower = tag.to_ascii_lowercase();
-                if lower == "red" {
-                    s.red = true;
-                } else if let Some(rest) = tag.strip_prefix('$') {
-                    let (sym, lcid) = rest.split_once('-').unwrap_or((rest, ""));
-                    s.lcid = u32::from_str_radix(lcid.trim(), 16).unwrap_or(0);
-                    if s.date {
-                        if !sym.is_empty() {
-                            s.tokens.push(format!("\"{sym}"));
-                        }
-                    } else {
-                        lit.push_str(sym);
-                    }
-                } else if s.date && matches!(lower.as_str(), "h" | "hh" | "m" | "mm" | "s" | "ss") {
-                    s.tokens.push(format!("[{lower}]"));
-                }
+                s.bracket_tag(&tag, &mut lit);
             }
             '@' => {
                 s.text_at = true;
                 flush(&mut s, &mut lit, seen_digit);
                 seen_digit = true;
             }
-            _ if s.date => {
-                let lc = c.to_ascii_lowercase();
-                if matches!(lc, 'y' | 'm' | 'd' | 'h' | 's') {
-                    let mut tok = lc.to_string();
-                    while chars.get(i).is_some_and(|n| n.to_ascii_lowercase() == lc) {
-                        tok.push(lc);
-                        i += 1;
-                    }
-                    s.tokens.push(tok);
-                } else if starts_at(i - 1, "am/pm") {
-                    s.tokens.push("ampm".into());
-                    i += 4;
-                } else if starts_at(i - 1, "a/p") {
-                    s.tokens.push("ap".into());
-                    i += 2;
-                } else if c == '0' {
-                    let mut tok = "0".to_string();
-                    while chars.get(i) == Some(&'0') {
-                        tok.push('0');
-                        i += 1;
-                    }
-                    s.tokens.push(tok);
-                } else {
-                    s.tokens.push(format!("\"{c}"));
-                }
-            }
+            _ if s.date => s.date_token(c, (&chars, &lower), &mut i),
             '0' | '#' | '?' => {
                 if !seen_digit {
                     flush(&mut s, &mut lit, false);
@@ -1036,9 +1052,7 @@ fn draw_sheet(canvas: &mut Canvas, sh: &Sheet, styles: &Styles, notes: &mut Note
         Some((fw, fh)) => {
             let total_w: f64 = (1..=max_col).map(width).sum();
             let total_h: f64 = (1..=max_row).map(row_h).sum();
-            let kw = if fw > 0 && total_w > 0.0 { area_w * f64::from(fw) / total_w } else { f64::INFINITY };
-            let kh = if fh > 0 && total_h > 0.0 { area_h * f64::from(fh) / total_h } else { f64::INFINITY };
-            kw.min(kh).clamp(0.1, 1.0)
+            fit_scale((fw, fh), (total_w, total_h), (area_w, area_h))
         }
         None => sh.scale,
     };
@@ -1096,25 +1110,7 @@ fn draw_sheet(canvas: &mut Canvas, sh: &Sheet, styles: &Styles, notes: &mut Note
         let x_of = |c: u32| ml + at(&col_at, c) - at(&col_at, *c0);
         let y_of = |r: u32| ph - mt - (at(&row_at, r) - at(&row_at, *r0));
         if sh.gridlines {
-            let (xa, xb) = (x_of(*c0), x_of(c1 + 1));
-            let (ya, yb) = (y_of(*r0), y_of(r1 + 1));
-            // A hidden column or row puts its gridline where the next one goes: draw it once.
-            let mut last = f64::NAN;
-            for c in *c0..=c1 + 1 {
-                let x = x_of(c);
-                if (x - last).abs() > 0.01 || c == *c0 {
-                    page.line(x, ya, x, yb, 0.25, [0.75; 3]);
-                    last = x;
-                }
-            }
-            last = f64::NAN;
-            for r in *r0..=r1 + 1 {
-                let y = y_of(r);
-                if (y - last).abs() > 0.01 || r == *r0 {
-                    page.line(xa, y, xb, y, 0.25, [0.75; 3]);
-                    last = y;
-                }
-            }
+            draw_gridlines(page, (&x_of, &y_of), (*c0, *c1), (*r0, *r1));
         }
         // Fills first, then text, then borders on top. The page's cells, row by occupied row and
         // only within its columns, already in (row, col) order: a wide sheet's row band holds
@@ -1214,19 +1210,7 @@ fn draw_sheet(canvas: &mut Canvas, sh: &Sheet, styles: &Styles, notes: &mut Note
             }
             let Some(xf) = styles.xfs.get(cell.xf) else { continue };
             let Some(b) = styles.borders.get(xf.border) else { continue };
-            let (x, y, w, h) = rect(*r, *c);
-            if let Some(e) = b.top {
-                page.line(x, y + h, x + w, y + h, e.width, e.color);
-            }
-            if let Some(e) = b.bottom {
-                page.line(x, y, x + w, y, e.width, e.color);
-            }
-            if let Some(e) = b.left {
-                page.line(x, y, x, y + h, e.width, e.color);
-            }
-            if let Some(e) = b.right {
-                page.line(x + w, y, x + w, y + h, e.width, e.color);
-            }
+            draw_borders(page, b, rect(*r, *c));
         }
         page.restore();
     }
@@ -1234,6 +1218,52 @@ fn draw_sheet(canvas: &mut Canvas, sh: &Sheet, styles: &Styles, notes: &mut Note
         notes.add("merged ranges on very dense pages, drawn unmerged");
     }
     Ok(())
+}
+
+/// The print scale that fits `total` points into `fit` pages of `area` points across and down.
+fn fit_scale((fw, fh): (u32, u32), (total_w, total_h): (f64, f64), (area_w, area_h): (f64, f64)) -> f64 {
+    let kw = if fw > 0 && total_w > 0.0 { area_w * f64::from(fw) / total_w } else { f64::INFINITY };
+    let kh = if fh > 0 && total_h > 0.0 { area_h * f64::from(fh) / total_h } else { f64::INFINITY };
+    kw.min(kh).clamp(0.1, 1.0)
+}
+
+/// Draw the gridlines of a page's columns `c0..=c1` and rows `r0..=r1`, placed by `x_of`/`y_of`.
+fn draw_gridlines(page: &mut Page, (x_of, y_of): (&dyn Fn(u32) -> f64, &dyn Fn(u32) -> f64), (c0, c1): (u32, u32), (r0, r1): (u32, u32)) {
+    let (xa, xb) = (x_of(c0), x_of(c1 + 1));
+    let (ya, yb) = (y_of(r0), y_of(r1 + 1));
+    // A hidden column or row puts its gridline where the next one goes: draw it once.
+    let mut last = f64::NAN;
+    for c in c0..=c1 + 1 {
+        let x = x_of(c);
+        if (x - last).abs() > 0.01 || c == c0 {
+            page.line(x, ya, x, yb, 0.25, [0.75; 3]);
+            last = x;
+        }
+    }
+    last = f64::NAN;
+    for r in r0..=r1 + 1 {
+        let y = y_of(r);
+        if (y - last).abs() > 0.01 || r == r0 {
+            page.line(xa, y, xb, y, 0.25, [0.75; 3]);
+            last = y;
+        }
+    }
+}
+
+/// Stroke a cell's borders around its rectangle `(x, y, w, h)`, `y` at the bottom.
+fn draw_borders(page: &mut Page, b: &Edges, (x, y, w, h): (f64, f64, f64, f64)) {
+    if let Some(e) = b.top {
+        page.line(x, y + h, x + w, y + h, e.width, e.color);
+    }
+    if let Some(e) = b.bottom {
+        page.line(x, y, x + w, y, e.width, e.color);
+    }
+    if let Some(e) = b.left {
+        page.line(x, y, x, y + h, e.width, e.color);
+    }
+    if let Some(e) = b.right {
+        page.line(x + w, y, x + w, y + h, e.width, e.color);
+    }
 }
 
 fn numeric_overflow(cell: &Cell, text_w: f64, w: f64) -> bool {
