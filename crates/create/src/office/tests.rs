@@ -1154,3 +1154,20 @@ fn col_ranges_hide_every_column_they_name() {
     assert!(text.contains("(Acell)"), "{text}");
     assert!(!text.contains("(Farcell)"), "column FZZ (4628) is inside the hidden range: {text}");
 }
+
+/// Text running on into empty neighbours walks one column at a time: with thousands of hidden
+/// (zero-width) columns beside many long texts, that walk is bounded per sheet, the rest of the
+/// texts are clipped to their cells, and the report says so.
+#[test]
+fn text_run_on_over_hidden_columns_is_bounded() {
+    let long = "x".repeat(200);
+    let rows: String =
+        (1..=50_000).map(|r| format!(r#"<row r="{r}" ht="2" customHeight="1"><c r="A{r}" t="inlineStr"><is><t>{long}</t></is></c></row>"#)).collect();
+    // One value in the last column makes the print area span every hidden column.
+    let last = r#"<row r="50001"><c r="XFD50001" t="inlineStr"><is><t>fim</t></is></c></row>"#;
+    let sheet = format!(r#"<cols><col min="2" max="16384" hidden="1"/></cols><sheetData>{rows}{last}</sheetData>"#);
+    let started = std::time::Instant::now();
+    let (_, report) = from_office("runon.xlsx", &xlsx(&sheet, &[])).unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(20), "{:?}", started.elapsed());
+    assert!(report.notes.iter().any(|n| n.contains("clipped")), "{report:?}");
+}

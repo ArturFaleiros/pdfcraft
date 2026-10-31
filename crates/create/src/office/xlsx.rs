@@ -22,6 +22,8 @@ const MAX_CELLS: usize = 2_000_000;
 const MAX_MERGES: usize = 20_000;
 /// Most cell text a sheet keeps, in bytes.
 const MAX_TEXT_BYTES: usize = 64 << 20;
+/// Most columns a sheet's texts step through when running on into their empty neighbours.
+const MAX_RUN_ON_WORK: usize = 20_000_000;
 /// Most merge comparisons a sheet's pages make when finding the merge each cell is in.
 const MAX_MERGE_WORK: usize = 100_000_000;
 const MAX_COL: u32 = 16_384;
@@ -966,6 +968,31 @@ fn shared_strings(zip: &Zip<'_>, rels: &Rels) -> Result<Vec<String>, String> {
         .collect())
 }
 
+/// How wide text at `(r, c)` may draw, running on into empty, unmerged neighbours up to `c1`
+/// until it is `needed` wide (it starts `w` wide). Each step spends one of the sheet's `work`;
+/// when none are left the text stops where it is and `cut` is set.
+fn run_on(
+    sh: &Sheet,
+    (r, c, c1): (u32, u32, u32),
+    (w, needed): (f64, f64),
+    width: &dyn Fn(u32) -> f64,
+    covered: &dyn Fn(u32, u32) -> bool,
+    (work, cut): (&std::cell::Cell<usize>, &std::cell::Cell<bool>),
+) -> f64 {
+    let mut clip_w = w;
+    let mut cc = c.saturating_add(1);
+    while clip_w < needed && cc <= c1 && sh.cells.get(&(r, cc)).is_none_or(|n| n.text.is_empty()) && !covered(r, cc) {
+        let Some(left) = work.get().checked_sub(1) else {
+            cut.set(true);
+            break;
+        };
+        work.set(left);
+        clip_w += width(cc);
+        cc = cc.saturating_add(1);
+    }
+    clip_w
+}
+
 fn draw_sheet(canvas: &mut Canvas, sh: &Sheet, styles: &Styles, notes: &mut Notes) -> Result<(), String> {
     if sh.cells.is_empty() {
         return Ok(());
@@ -1081,6 +1108,9 @@ fn draw_sheet(canvas: &mut Canvas, sh: &Sheet, styles: &Styles, notes: &mut Note
     // cells are drawn unmerged (and that is reported) rather than scanning on.
     let merge_work = std::cell::Cell::new(MAX_MERGE_WORK);
     let merge_cut = std::cell::Cell::new(false);
+    // Text runs on one column at a time; past this many steps on a sheet, the rest is clipped.
+    let run_on_work = std::cell::Cell::new(MAX_RUN_ON_WORK);
+    let run_on_cut = std::cell::Cell::new(false);
     for (ci, ri) in pages {
         let (Some((c0, c1)), Some((r0, r1))) = (col_bands.get(ci), row_bands.get(ri)) else { continue };
         // Only the merges that touch this page are searched for each of its cells.
@@ -1177,11 +1207,7 @@ fn draw_sheet(canvas: &mut Canvas, sh: &Sheet, styles: &Styles, notes: &mut Note
             let mut clip_w = w;
             if !xf.wrap && !cell.numeric && align == "left" {
                 let tw = lines.first().map_or(0.0, |l| style.width(l));
-                let mut cc = c + 1;
-                while clip_w < tw + 4.0 && cc <= *c1 && sh.cells.get(&(*r, cc)).is_none_or(|n| n.text.is_empty()) && !covered(*r, cc) {
-                    clip_w += width(cc);
-                    cc += 1;
-                }
+                clip_w = run_on(sh, (*r, *c, *c1), (w, tw + 4.0), &width, &covered, (&run_on_work, &run_on_cut));
             }
             page.save();
             page.clip_rect(x, y, clip_w, h);
@@ -1213,6 +1239,9 @@ fn draw_sheet(canvas: &mut Canvas, sh: &Sheet, styles: &Styles, notes: &mut Note
             draw_borders(page, b, rect(*r, *c));
         }
         page.restore();
+    }
+    if run_on_cut.get() {
+        notes.add("text running on into thousands of empty or hidden columns, clipped to its cell");
     }
     if merge_cut.get() {
         notes.add("merged ranges on very dense pages, drawn unmerged");
