@@ -9712,6 +9712,20 @@ fn comments_are_reshaped_through_the_tool() {
     assert!(matches!(a.call("comment_edit", &json!({ "doc": doc, "page": 1, "index": 1, "points": "no" })), Err(ToolError::InvalidArgs(_))));
 }
 
+/// Writing a PDF under the name of the Word file it came from would replace that file with PDF
+/// bytes: saving (`doc_save`) and the tools that write a combined PDF (`out`) refuse it.
+fn office_source_is_never_written_over(a: &mut Automation, dir: &Path, converted: u64, original: &[u8]) {
+    for (tool, args) in [
+        ("doc_save", json!({ "doc": converted, "path": "report.docx" })),
+        ("doc_combine", json!({ "paths": ["b.pdf", "report.docx"], "out": "report.docx" })),
+        ("doc_create_multiple", json!({ "paths": ["b.pdf", "report.docx"], "out": "report.docx" })),
+    ] {
+        let over = a.call(tool, &args);
+        assert!(matches!(&over, Err(e) if e.to_string().contains("Office")), "{tool}: {over:?}");
+        assert_eq!(std::fs::read(dir.join("report.docx")).unwrap(), original, "{tool}: the Word file is untouched");
+    }
+}
+
 #[test]
 fn docx_open_insert_combine_and_root_confinement() {
     let dir = workdir("docx-import");
@@ -9727,10 +9741,7 @@ fn docx_open_insert_combine_and_root_confinement() {
     let converted = opened["doc"].as_u64().unwrap();
     assert!(a.call("doc_save", &json!({ "doc": converted })).is_err(), "Save requires a PDF destination");
     ok(&mut a, "doc_save", json!({ "doc": converted, "path": "converted.pdf" }));
-    // Saving the converted PDF over the Word file it came from would replace it with PDF bytes.
-    let over = a.call("doc_save", &json!({ "doc": converted, "path": "report.docx" }));
-    assert!(matches!(&over, Err(e) if e.to_string().contains("Office")), "{over:?}");
-    assert_eq!(std::fs::read(dir.join("report.docx")).unwrap(), original, "the Word file is untouched");
+    office_source_is_never_written_over(&mut a, &dir, converted, &original);
     let inserted = ok(&mut a, "page_insert_file", json!({ "doc": base, "path": "report.docx", "pages": [2], "at": 1 }));
     assert!(inserted["office"]["notice"].as_str().unwrap().contains("layout may differ"));
     assert_eq!(page_text(&mut a, base).len(), 4);

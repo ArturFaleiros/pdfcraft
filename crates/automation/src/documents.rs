@@ -1,6 +1,6 @@
 use super::error::{Result, ToolError, failed};
 use super::json::{Args, nest_rows, office_report, security, summary};
-use super::paths::{child, read_input, write_atomic};
+use super::paths::{child, read_input, refuse_office_target, write_atomic};
 use super::{Arc, Automation, BlockKey, DocId, Document, Edit, Path, PathBuf, TextBlock, Value, comments, file_access, json};
 
 /// How far a watermark may be moved from the page centre, in points (a page is at most 14,400).
@@ -149,13 +149,7 @@ impl Automation {
                 own_path
             }
         };
-        // A document opened from a Word, PowerPoint or Excel file is a converted PDF with no path:
-        // saving it under an Office name would replace that file with PDF bytes.
-        let office =
-            target.extension().and_then(|e| e.to_str()).is_some_and(|e| pdfcraft_engine::OFFICE_EXTENSIONS.iter().any(|o| o.eq_ignore_ascii_case(e)));
-        if office {
-            return Err(ToolError::InvalidArgs(format!("{}: a PDF can't be saved under an Office file name; save it as .pdf", target.display())));
-        }
+        refuse_office_target(&target)?;
         let same_file = doc.path.as_deref().is_some_and(|p| Path::new(p) == target);
         // Saving to a new file is a full rewrite unless asked otherwise, like Save As.
         let full = a.opt_bool("full")?.unwrap_or(!same_file);

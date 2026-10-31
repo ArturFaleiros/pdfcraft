@@ -119,7 +119,6 @@ pub(crate) struct Laid {
     pub before: f64,
     pub after: f64,
     pub shade: Option<[f64; 3]>,
-    pub page_break_before: bool,
     pub left: f64,
     pub right: f64,
 }
@@ -341,7 +340,6 @@ pub(crate) fn layout(p: &Para, width: f64, fields: (usize, usize)) -> Laid {
         before: fin(p.before, 0.0).clamp(0.0, 2000.0),
         after: fin(p.after, 0.0).clamp(0.0, 2000.0),
         shade: p.shade,
-        page_break_before: p.page_break_before,
         left,
         right: right_edge,
     }

@@ -697,6 +697,9 @@ struct Cx<'z, 'd> {
     /// How many footnote and endnote references `note_refs` holds, for their labels.
     footnotes: usize,
     endnotes: usize,
+    /// Reading the body (and its notes), not a header or footer: the body is laid out before
+    /// the page count is known, so a NUMPAGES field there keeps the total Word saved.
+    in_body: bool,
 }
 
 impl Cx<'_, '_> {
@@ -810,7 +813,8 @@ impl Cx<'_, '_> {
                     }
                 }
                 "fldSimple" => {
-                    if let Some(field) = page_field(attr(c, "instr").unwrap_or_default()) {
+                    let field = page_field(attr(c, "instr").unwrap_or_default()).filter(|f| *f == Field::Page || !self.in_body);
+                    if let Some(field) = field {
                         para.items.push(Inline::Field(field, self.run_props(None, base)));
                     } else {
                         self.inline(c, rels, base, para, out, extra, state, depth + 1);
@@ -862,6 +866,7 @@ impl Cx<'_, '_> {
                     Some("begin") => *state = FieldState::Instr(String::new()),
                     Some("separate") => {
                         let field = if let FieldState::Instr(i) = &*state { page_field(i) } else { None };
+                        let field = field.filter(|f| *f == Field::Page || !self.in_body);
                         if let Some(field) = field {
                             para.items.push(Inline::Field(field, style.clone()));
                         }
@@ -1190,10 +1195,11 @@ impl Flow<'_> {
     }
 
     fn para(&mut self, p: &Para, next: Option<&Block>) -> Result<(), String> {
-        let laid = flow::layout(p, self.width(), (1, 1));
-        if laid.page_break_before && !self.at_top {
+        if p.page_break_before && !self.at_top {
             self.new_page()?;
         }
+        // A PAGE field shows the page the paragraph starts on (the page count isn't known yet).
+        let laid = flow::layout(p, self.width(), (self.page.saturating_add(1), 1));
         // Contextual spacing: no space between paragraphs of the same style.
         let mut before = laid.before;
         if let (Some(style), Some((prev, prev_after))) = (&p.contextual, &self.prev_contextual)
@@ -1285,8 +1291,11 @@ impl Flow<'_> {
                 let x1 = edges.get(g).copied().unwrap_or(0.0);
                 let x2 = edges.get(g.saturating_add(cell.span).min(ncols)).copied().unwrap_or(table_w);
                 let inner = (x2 - x1 - t.pad.0 - t.pad.1).max(4.0);
-                let laids: Vec<Laid> =
-                    if cell.vmerge == Some(false) { Vec::new() } else { cell.paras.iter().map(|p| flow::layout(p, inner, (1, 1))).collect() };
+                let laids: Vec<Laid> = if cell.vmerge == Some(false) {
+                    Vec::new()
+                } else {
+                    cell.paras.iter().map(|p| flow::layout(p, inner, (self.page.saturating_add(1), 1))).collect()
+                };
                 let mut items = Vec::new();
                 for (pi, l) in laids.iter().enumerate() {
                     let same = |a: usize, b: usize| matches!((cell.paras.get(a).and_then(|p| p.contextual.as_ref()), cell.paras.get(b).and_then(|p| p.contextual.as_ref())), (Some(x), Some(y)) if x == y);
@@ -1425,7 +1434,8 @@ pub(crate) fn convert(zip: &Zip<'_>, main: &str, doc: &mut Document, notes: &mut
     let theme = load_theme(zip, &rels);
     let styles = load_styles(zip, &rels)?;
     let numbering = load_numbering(zip, &rels)?;
-    let mut cx = Cx { zip, doc, notes, styles, numbering, theme, images: HashMap::new(), note_refs: Vec::new(), footnotes: 0, endnotes: 0 };
+    let mut cx =
+        Cx { zip, doc, notes, styles, numbering, theme, images: HashMap::new(), note_refs: Vec::new(), footnotes: 0, endnotes: 0, in_body: true };
 
     // Split the body into sections: a paragraph carrying a sectPr ends one.
     let final_sect = child(body, "sectPr");
@@ -1543,6 +1553,8 @@ pub(crate) fn convert(zip: &Zip<'_>, main: &str, doc: &mut Document, notes: &mut
             *slot = Some(pi);
         }
     }
+    // Headers and footers are laid out per page, with the page count known.
+    cx.in_body = false;
     for (pi, si) in page_sections.iter().enumerate() {
         let Some((sec, _)) = sections.get(*si) else { continue };
         let first_of_section = section_first_page.get(*si).copied().flatten() == Some(pi);

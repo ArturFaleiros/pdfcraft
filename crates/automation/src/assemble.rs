@@ -1,6 +1,6 @@
 use super::error::{Result, ToolError, failed};
 use super::json::{Args, office_report, one_based, summary};
-use super::paths::{child, read_input, read_input_bytes, unused, write_atomic};
+use super::paths::{child, read_input, read_input_bytes, refuse_office_target, unused, write_atomic};
 use super::{Arc, Automation, CombineSource, Edit, Path, PathBuf, Value, json};
 
 impl Automation {
@@ -203,6 +203,7 @@ impl Automation {
         let out = a.opt_str("out")?;
         if let Some(out) = out {
             let path = self.resolve(out, true)?;
+            refuse_office_target(&path)?;
             write_atomic(&path, &bytes)?;
             result["path"] = json!(path.to_string_lossy());
         }

@@ -595,6 +595,57 @@ const MESES: [&str; 12] =
 const DAYS: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const DIAS: [&str; 7] = ["domingo", "segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sábado"];
 
+/// An ISO 8601 date, date-time or time (`t="d"` cells) as an Excel serial in the workbook's date
+/// system: the inverse of [`date`].
+fn iso_serial(v: &str, date1904: bool) -> Option<f64> {
+    use chrono::{NaiveDate, NaiveDateTime, NaiveTime, Timelike};
+    let v = v.trim().trim_end_matches('Z');
+    let (day, time) = if let Ok(dt) = NaiveDateTime::parse_from_str(v, "%Y-%m-%dT%H:%M:%S%.f") {
+        (Some(dt.date()), dt.time())
+    } else if let Ok(d) = NaiveDate::parse_from_str(v, "%Y-%m-%d") {
+        (Some(d), NaiveTime::MIN)
+    } else {
+        (None, NaiveTime::parse_from_str(v, "%H:%M:%S%.f").ok()?)
+    };
+    let serial_day = match day {
+        None => 0,
+        Some(d) => {
+            let ce = i64::from(d.num_days_from_ce());
+            // The 1900 system counts a 29 February 1900 that never was: serial 60, so days from
+            // 1 March 1900 are one more than their distance from 30 December 1899.
+            if date1904 {
+                ce - 695_056
+            } else if ce - 693_594 >= 61 {
+                ce - 693_594
+            } else {
+                ce - 693_595
+            }
+        }
+    };
+    Some(serial_day as f64 + f64::from(time.num_seconds_from_midnight()) / 86_400.0)
+}
+
+/// A `t="d"` cell: its ISO date shown in the cell's number format (as an ISO date and time under
+/// General), or as written, and reported, when it can't be read.
+fn iso_date_cell(cell: &mut Cell, v: &str, styles: &Styles, date1904: bool, notes: &mut Notes) {
+    let Some(serial) = iso_serial(v, date1904) else {
+        cell.text = v.trim().to_owned();
+        notes.add("date cells in a form PdfCraft can't read, shown as written");
+        return;
+    };
+    let id = styles.xfs.get(cell.xf).map_or(0, |x| x.num_fmt);
+    let code = match styles.formats.get(&id) {
+        Some(code) => code.as_str(),
+        None if id == 0 && serial.fract() == 0.0 => "yyyy-mm-dd",
+        None if id == 0 => "yyyy-mm-dd hh:mm:ss",
+        None => builtin_format(id),
+    };
+    let (t, red) = format_number(serial, code, date1904);
+    cell.text = t;
+    cell.red = red;
+    cell.numeric = true;
+}
+
 fn date(serial: f64, sec: &Section, date1904: bool) -> Option<String> {
     if !serial.is_finite() || !(-1.0..3_000_000.0).contains(&serial) {
         return None;
@@ -913,6 +964,7 @@ fn read_sheet(zip: &Zip<'_>, part: &str, shared: &[String], styles: &Styles, dat
                         cell.text = v.to_owned();
                         cell.boolean = true;
                     }
+                    "d" => iso_date_cell(&mut cell, v, styles, date1904, notes),
                     _ => {
                         if let Ok(x) = v.trim().parse::<f64>()
                             && x.is_finite()

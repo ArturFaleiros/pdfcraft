@@ -30,7 +30,8 @@ Layer L4. Create a PDF (Acrobat's Create a PDF tool), execution plan M10.2:
   formats. Text is set in the standard-14 faces chosen from each run's font family, with Turkish,
   Central European, Baltic and Romanian letters drawn through a second encoding of the same face
   (`office/latin.rs`); characters they can't draw are written as `[U+XXXX]`. Returns the document and an `OfficeReport` counting
-  what was approximated (charts and vector images become outlined boxes). See
+  what was approximated (Word and PowerPoint charts and vector images become outlined boxes; Excel
+  charts and sheet pictures are left out). See
   [Word, PowerPoint and Excel to PDF](../../docs/office-import.md).
 
 `source_kind` recognises Office packages (and encrypted ones, which `from_office` refuses with a

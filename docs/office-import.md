@@ -1,6 +1,6 @@
 # Word, PowerPoint and Excel to PDF
 
-> **Status:** M10 candidate, native import of Office Open XML · **Revision history:** 2026-10-14 first version; 2026-10-16 #2871 workflow completion and reporting; 2026-10-22 Turkish and Central European letters drawn, UI notices translated and shown only when something was approximated; 2026-10-25 review fixes (Word 2010 text boxes, nested boxes, master placeholders, merged table cells, stored column widths) and the known gaps listed; 2026-10-27 wording: what can be left out, which workflows convert off the UI thread.
+> **Status:** M10 candidate, native import of Office Open XML · **Revision history:** 2026-10-14 first version; 2026-10-16 #2871 workflow completion and reporting; 2026-10-22 Turkish and Central European letters drawn, UI notices translated and shown only when something was approximated; 2026-10-25 review fixes (Word 2010 text boxes, nested boxes, master placeholders, merged table cells, stored column widths) and the known gaps listed; 2026-10-27 wording: what can be left out, which workflows convert off the UI thread; 2026-10-31 body page fields, ISO date cells, Office names refused as PDF destinations.
 
 PdfCraft opens Word (`.docx`, `.docm`, `.dotx`), PowerPoint (`.pptx`, `.pptm`, `.ppsx`, `.potx`) and
 Excel (`.xlsx`, `.xlsm`, `.xltx`) files as new, unsaved PDFs. The conversion is native Rust in
@@ -28,7 +28,9 @@ it works in the browser build too. The source file is only read.
   puts the same sentence in the row's warnings. Automation results carry an English `notice` that
   also states the standard-font caveat, and `doc_combine` returns a `conversions` array with
   per-source paths, approximation counts and notices. Deep content skipped at the nesting
-  limit is counted. Source files are never written by these operations.
+  limit is counted. Source files are never written by these operations, and the automation tools
+  that write a PDF (`doc_save`, and `doc_combine` and `doc_create_multiple` with `out`) refuse a
+  Word, PowerPoint or Excel file name as the destination, so a source can't be overwritten.
 
 ```json
 [
@@ -88,7 +90,8 @@ states the standard-font substitution. Nothing in the source is changed.
   sections are set in one column; Excel charts and pictures, chart sheets, headers and footers,
   and print areas are not used.
 - **Known gaps, not yet handled** (the source file is never changed, but some content is
-  simplified or left out of the PDF, and the conversion report notes the content-specific cases):
+  simplified or left out of the PDF; the conversion report notes many of these cases, not all of
+  them, so an empty report doesn't mean an exact copy: check this list):
   - Word: right, centre and decimal tab stops are set as left stops, so a "title ⇥ page" line in a
     table of contents or footer can wrap; dot leaders are not drawn; a table style's paragraph
     spacing and banded shading are not applied to its cells; tables in headers and footers are
@@ -101,7 +104,7 @@ states the standard-font substitution. Nothing in the source is changed.
   - Excel: a number that just fits its column in Calibri can be shown as `####`, as Helvetica is
     wider; General numbers aren't shortened to fit; outside borders of merged ranges and their
     wrap width come from the first cell only; rows without a stated height aren't grown for
-    large fonts; ISO date cells (`t="d"`) are left empty.
+    large fonts.
   - Desktop app: Create PDF from multiple files converts each file on the UI thread (as it does
     images and text), so a large Office file pauses the window while it converts; File ▸ Open
     converts off the UI thread.

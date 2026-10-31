@@ -1171,3 +1171,39 @@ fn text_run_on_over_hidden_columns_is_bounded() {
     assert!(started.elapsed() < std::time::Duration::from_secs(20), "{:?}", started.elapsed());
     assert!(report.notes.iter().any(|n| n.contains("clipped")), "{report:?}");
 }
+
+/// A PAGE field in the body shows the page its paragraph is on, and a NUMPAGES field there the
+/// total Word saved (the body is laid out before the total is known).
+#[test]
+fn body_page_fields_show_their_own_page() {
+    let field = |instr: &str, cached: &str| {
+        format!(
+            r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> {instr} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>{cached}</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+        )
+    };
+    let page_break = r#"<w:p><w:r><w:br w:type="page"/></w:r></w:p>"#;
+    let last = format!(
+        r#"<w:p><w:r><w:t xml:space="preserve">Pagina </w:t></w:r>{}<w:r><w:t xml:space="preserve"> de </w:t></w:r>{}</w:p>"#,
+        field("PAGE", "9"),
+        field("NUMPAGES", "3")
+    );
+    let body = format!("{}{page_break}{}{page_break}{last}", p("Um"), p("Dois"));
+    let (doc, report) = from_office("paginas.docx", &docx(&body, &[], &[])).unwrap();
+    assert_eq!(report.pages, 3, "{report:?}");
+    let doc = reopen(&doc);
+    let third = content(&doc, &pages(&doc)[2]);
+    assert_eq!(third.matches("(3)").count(), 2, "page 3 of 3, not 1 of 1: {third}");
+}
+
+/// ISO date cells (`t="d"`) are dates: shown in the cell's date format, or as an ISO date under
+/// General; one PdfCraft can't read is shown as written and reported.
+#[test]
+fn iso_date_cells_are_shown() {
+    let sheet = r#"<cols><col min="1" max="1" width="30" customWidth="1"/></cols><sheetData><row r="1"><c r="A1" t="d" s="2"><v>2024-03-05</v></c></row><row r="2"><c r="A2" t="d"><v>2024-03-05T13:45:00Z</v></c></row><row r="3"><c r="A3" t="d"><v>ontem</v></c></row></sheetData>"#;
+    let (doc, report) = from_office("datas.xlsx", &xlsx(sheet, &[])).unwrap();
+    let text = all_text(&reopen(&doc));
+    assert!(text.contains("(05/03/2024)"), "the cell's dd/mm/yyyy format: {text}");
+    assert!(text.contains("2024-03-05") && text.contains("13:45:00"), "General shows the ISO date and time: {text}");
+    assert!(text.contains("(ontem)"), "an unreadable date is shown as written: {text}");
+    assert!(report.notes.iter().any(|n| n.contains("date")), "{report:?}");
+}
